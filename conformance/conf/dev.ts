@@ -72,13 +72,22 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
     const root = await req(env, web, jar, 'GET', '/');
     const health = await req(env, web, jar, 'GET', '/api/health');
     const nope = await req(env, web, jar, 'GET', '/api/no-such-route');
-    const ok = root.status === 200 && (root.headers.get('content-type') ?? '').includes('html') && health.status === 200 && nope.status === 404;
-    out.set('CONF:dev-routes', (ok ? pass : fail)(`from a fresh copy after "${d.setup ?? 'no setup'}": / ${root.status}, /api/health ${health.status}, unknown /api ${nope.status}, on one port`));
-
     // DEV-6: on a mirror the session cookie drops Secure, or http://localhost couldn't keep it.
     const got = await signIn(env, web, jar, 'mirror-cookie@example.test');
     const session = got.callback?.cookies.map(cookieAttrs).find((c) => c.value && c.httpOnly && !/state/i.test(c.name));
     out.set('CONF:cookies', session ? (!session.secure ? pass : fail)(`on a mirror the session cookie ${session.secure ? 'still has' : 'drops'} Secure`) : fail(got.problem ?? 'no session cookie on the mirror'));
+
+    // DEV-1 / SEC-6: the browser's Host must reach the API unchanged through any dev proxy. Check /auth too.
+    const own = { origin: env.base(web), 'sec-fetch-site': 'same-origin' };
+    const other = { origin: 'https://other-app.agent.cloud', 'sec-fetch-site': 'same-site' };
+    const note = await req(env, web, jar, 'POST', '/api/notes', { title: 'A note from the mirror page' }, own);
+    const refused = await req(env, web, jar, 'POST', '/api/notes', { title: 'A note from another page' }, other);
+    const signout = await req(env, web, new Map(), 'POST', '/auth/sign-out', {}, own);
+    const refusedSignout = await req(env, web, new Map(), 'POST', '/auth/sign-out', {}, other);
+    const crossOrigin = (r: typeof refused) => r.status === 403 && (r.json as { error?: { code?: string } } | null)?.error?.code === 'cross_origin';
+    const ok = root.status === 200 && (root.headers.get('content-type') ?? '').includes('html') && health.status === 200 && nope.status === 404
+      && note.status === 201 && signout.status === 200 && crossOrigin(refused) && crossOrigin(refusedSignout);
+    out.set('CONF:dev-routes', (ok ? pass : fail)(`from a fresh copy after "${d.setup ?? 'no setup'}": / ${root.status}, health ${health.status}, unknown API ${nope.status}; own-origin POST notes ${note.status}, sign-out ${signout.status}; other-origin POST notes ${refused.status}, sign-out ${refusedSignout.status}`));
 
     // DEV-3, then DEV-2: a server save may restart the whole dev process, so the UI's turn comes first.
     out.set('CONF:reload-ui', await reloadHttp(env, web, d.reload.ui));
