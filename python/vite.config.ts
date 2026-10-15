@@ -9,5 +9,6 @@ export default defineConfig({
   root: 'web',
   plugins: [react()],
   build: { outDir: 'dist', emptyOutDir: true },
-  server: { proxy: { '/api': api, '/auth': api } },
+  // Keep the browser's Host: the API compares it with Origin before accepting a write (SEC-6).
+  server: { proxy: { '/api': { target: api, changeOrigin: false }, '/auth': { target: api, changeOrigin: false } } },
 });
