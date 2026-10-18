@@ -1,7 +1,9 @@
 // The app's routes: sign-in, the notes API, health. Shared by the production server (main.ts) and the dev server
 // (dev.ts), which add the UI around it.
+import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
+import { z } from 'zod';
 import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
 import { event, log } from './log.ts';
@@ -58,17 +60,26 @@ const signedIn = (c: { get: (k: 'user') => Env['Variables']['user'] }) => {
 
 app.get('/api/me', (c) => c.json({ user: signedIn(c) }));
 
+// Every body is checked against its schema before the handler sees it. One that doesn't fit answers 400 in this app's
+// error shape, naming the first problem; one that isn't JSON at all, Hono answers 400 through onError below.
+const body = <T extends z.ZodType>(schema: T) => zValidator('json', schema, (result, c) => {
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    return c.json({ error: { code: 'bad_request', message: issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'The request isn\u2019t valid.' } }, 400);
+  }
+});
+
+const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
+
 app.get('/api/notes', async (c) => {
   const user = signedIn(c);
   const { rows } = await pool.query('SELECT id, title, created_at FROM notes WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100', [user.id]);
   return c.json(rows);
 });
 
-app.post('/api/notes', async (c) => {
+app.post('/api/notes', body(NoteIn), async (c) => {
   const user = signedIn(c);
-  const body = (await c.req.json().catch(() => ({}))) as { title?: unknown };
-  const title = typeof body.title === 'string' ? body.title.trim() : '';
-  if (!title || title.length > 200) return c.json({ error: { code: 'bad_title', message: 'A title is 1 to 200 characters.' } }, 400);
+  const { title } = c.req.valid('json');
   try {
     // The note and the job that emails about it are saved together, or not at all.
     const note = await tx(async (db) => {

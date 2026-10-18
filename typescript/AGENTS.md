@@ -27,11 +27,26 @@ seed.sql            a demo person and three notes for a mirror that starts empty
 
 ## How to add things
 
-- **An API route:** in `server/app.ts`, under `/api/`. Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415).
+- **An API route:** in `server/app.ts`, under `/api/`. Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415), checked by a schema (below).
 - **A table or column:** `agc migration new <slug>`, then plain SQL in the new file, then `agc migrate`. Key things on `uuid`. Use `CHECK (status IN (…))` for fixed sets of values, so mirrors show them. Never change the schema from code.
 - **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, and add a handler in `server/worker.ts`. The worker polls every 10 s while busy and backs off to 10 minutes when idle, so the database can sleep: don't make a person wait on a job. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
 - **A workflow step:** `event('order.paid', 'order:<id>', { related: ['user:<id>'] })`. Ids only, never emails or names.
 - **Logging:** `log.info('what happened', { ids })`. Never log emails, names, tokens or request bodies.
+
+## Validate every request body
+
+Validate every request body with a schema: it's how a route takes input here. Existing routes and other validators are fine, and nothing in agent.cloud checks for it. The notes route shows the pattern: a Zod 4 schema checks the body before the handler runs, and the handler reads the parsed value, typed, with no cast.
+
+```ts
+const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
+app.post('/api/notes', body(NoteIn), async (c) => {
+  const { title } = c.req.valid('json');
+```
+
+- `body()` in `server/app.ts` answers 400 `{"error": {"code": "bad_request", "message": "title: …"}}` for a body that doesn't fit. `z.infer<typeof NoteIn>` is its type, if you need one.
+- This is Zod 4, and much example code is Zod 3. Write `z.email()`, `z.url()`, `z.uuid()` and `z.iso.datetime()`, not `z.string().email()`; give a custom message as `{ error: '…' }`, not `message` or `errorMap`.
+- `z.object` drops unknown fields; `z.strictObject` refuses them.
+- The environment (`server/env.ts`) and database rows (CHECK constraints) aren't request bodies: leave them as they are.
 
 ## Rules this stack keeps
 
