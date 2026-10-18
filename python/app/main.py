@@ -5,7 +5,7 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import psycopg
@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import log
@@ -95,19 +96,17 @@ def notes(request: Request) -> list[dict[str, object]]:
     return [{**r, "created_at": r["created_at"].isoformat()} for r in rows]
 
 
+class NoteIn(BaseModel):
+    """A new note's body. FastAPI checks it before add_note runs; one that doesn't fit answers 400 (bad_request below)."""
+
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
 @app.post("/api/notes", status_code=201)
-async def add_note(request: Request) -> Response:
+async def add_note(request: Request, body: NoteIn) -> Response:
     user = await asyncio.to_thread(signed_in, request)
     try:
-        body = await request.json()
-    except ValueError:
-        body = {}
-    raw = body.get("title") if isinstance(body, dict) else None
-    title = raw.strip() if isinstance(raw, str) else ""
-    if not title or len(title) > 200:
-        return JSONResponse({"error": {"code": "bad_title", "message": "A title is 1 to 200 characters."}}, 400)
-    try:
-        note = await asyncio.to_thread(_insert_note, user["id"], title)
+        note = await asyncio.to_thread(_insert_note, user["id"], body.title)
     except psycopg.errors.UniqueViolation:
         return JSONResponse({"error": {"code": "duplicate", "message": "You already have a note with that title."}}, 409)
     log.event("note.created", f"note:{note['id']}", related=[f"user:{user['id']}"])
@@ -146,7 +145,12 @@ async def http_error(_: Request, e: StarletteHTTPException) -> Response:
 
 @app.exception_handler(RequestValidationError)
 async def bad_request(_: Request, e: RequestValidationError) -> Response:
-    return JSONResponse({"error": {"code": "bad_request", "message": "The request isn't valid."}}, 400)
+    # A body that isn't JSON or doesn't fit its model: 400 in this app's error shape, naming the first problem.
+    first = next(iter(e.errors()), None)
+    if first is None:
+        return JSONResponse({"error": {"code": "bad_request", "message": "The request isn't valid."}}, 400)
+    field = "" if first["type"] == "json_invalid" else ".".join(str(p) for p in first["loc"][1:])
+    return JSONResponse({"error": {"code": "bad_request", "message": f"{field}: {first['msg']}" if field else first["msg"]}}, 400)
 
 
 # The UI: its built files, and any other path is a page of it (it routes on the client).

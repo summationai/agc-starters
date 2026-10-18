@@ -50,3 +50,10 @@ def test_a_callback_with_the_wrong_state_is_refused_before_any_trade() -> None:
     client.cookies.set("__Host-auth_state", "expected-state-value")
     r = client.get("/auth/callback?code=c&state=another-state-value", follow_redirects=False)
     assert r.status_code == 400
+
+
+def test_a_body_that_does_not_fit_answers_400_in_the_error_shape() -> None:
+    for body in ('{"title": "Broken', '{"title": 42}', "{}", '{"title": "   "}', '{"title": "' + "x" * 201 + '"}', "[]"):
+        r = client.post("/api/notes", content=body, headers={"content-type": "application/json"})
+        assert r.status_code == 400, body
+        assert set(r.json()) == {"error"} and set(r.json()["error"]) == {"code", "message"}, r.text

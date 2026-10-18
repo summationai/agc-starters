@@ -9,7 +9,7 @@ import { fail, pass, skip, verdict, type TestResult } from '../lib/report.ts';
 import { run, sleep, until } from '../lib/sh.ts';
 import type { Stack } from '../lib/stack.ts';
 import { dev } from './dev.ts';
-import { cookieAttrs, type Jar, req, signIn, UUID } from './http.ts';
+import { cookieAttrs, type Jar, req, type Res, signIn, UUID } from './http.ts';
 
 const NAME = /^[a-z][a-z0-9_.-]{0,63}$/;
 const ENTITY = /^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_.-]{1,64}$/;
@@ -21,7 +21,7 @@ export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
-  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:headers', 'CONF:app', 'CONF:seed',
+  'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -245,6 +245,17 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       if (ours.id) created.push(ours.id);
       const ok = sibling.status === 403 && sibling.code === 'cross_origin' && !sibling.made && marked.status === 403 && !marked.made && ours.status === 201;
       set('CONF:csrf-origin', (ok ? pass : fail)(`another origin ${sibling.status}${sibling.made ? ' and created a note' : ''}; same-site with no Origin ${marked.status}${marked.made ? ' and created a note' : ''}; its own origin ${ours.status}`));
+
+      // SEC-7: a body that isn't JSON, and one whose title isn't a string, answer 400 in the app's error shape and create nothing.
+      const count = async () => { const r = await req(env, web, jar, 'GET', '/api/notes'); return Array.isArray(r.json) ? r.json.length : -1; };
+      const shaped = (r: Res) => { const e = (r.json as { error?: { code?: unknown; message?: unknown } } | null)?.error; return typeof e?.code === 'string' && typeof e?.message === 'string'; };
+      const told = (what: string, r: Res) => `${what} ${r.status}${shaped(r) ? '' : ` without the error shape (${r.text.slice(0, 80)})`}`;
+      const before = await count();
+      const broken = await req(env, web, jar, 'POST', '/api/notes', '{"title": "Broken', { 'content-type': 'application/json' });
+      const numeric = await req(env, web, jar, 'POST', '/api/notes', { title: 42 });
+      const same = (await count()) === before;
+      const valid = broken.status === 400 && shaped(broken) && numeric.status === 400 && shaped(numeric) && same;
+      set('CONF:body-validation', (valid ? pass : fail)(`${told('a body that isn\u2019t JSON', broken)}; ${told('a numeric title', numeric)}; ${same ? 'nothing created' : 'a note was created'}`));
     }
 
     // APP-6: the demo person sees exactly the seeded notes, and the seed is idempotent.
