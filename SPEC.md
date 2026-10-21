@@ -117,7 +117,11 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 
 ## 11. The starter app
 
-Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it: people sign in, keep notes, and get an email for each note. These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the notes can go.
+Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it. It has two pages:
+- a welcome page at `/`, which says truthfully where the app runs and what's working;
+- a Notes example at `/notes`, where people sign in, keep notes, and get an email for each note.
+
+These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the welcome page and the notes can go.
 
 - **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns. `LINT:migrations`
 - **APP-2:** `GET /api/notes` answers the signed-in person's notes, newest first, as `[{id, title, created_at}]`. Signed out, it answers 401. `CONF:app`
@@ -139,6 +143,45 @@ Every starter is the same small app, so the shared UI works with every stack and
   `LINT:checks`, `CONF:smoke`
 - **APP-6:** A `seed.sql`, declared as `[data.db] seed = "seed.sql"`, inserts one demo person (a fixed uuid, `demo@example.test`, "Demo Person") and three notes for them, every insert `ON CONFLICT DO NOTHING`, touching only tables the migrations create and no DDL, in under 200 lines. agc runs it once on a mirror that starts empty, after the migrations (agent.cloud's `docs/specs/seed-data.md`); it never runs in production. `LINT:seed`, `CONF:seed` (after the migrations, the seed applies on the fake database; signed in as the demo person's id, `GET /api/notes` answers exactly those three notes; applying it a second time changes nothing)
 
+### The welcome page (APP-7 to APP-12)
+
+The welcome page is frame 0 of every app: what a person sees the first time `agc up` opens it, before their agent has built anything. It must never claim more than is true. In particular, it never says the app is live before its first release.
+
+- **APP-7:** `/` serves the welcome page, and `/notes` serves the Notes example: sign-in, the person's notes and the add form, as before. Both are routes of the one UI bundle, so a reload of either answers `index.html` (PROC-2). APP-2 to APP-6 stand unchanged. The Notes page says it's an example the agent removes once the app takes shape, and signing in from it returns to `/notes` (`/auth/sign-in?return_to=/notes`, AUTH-1). `CONF:app-pages` (`GET /` and `GET /notes` answer the UI's HTML), `LINT:app-pages` (the UI has both routes), `review`
+- **APP-8:** `GET /api/welcome` answers 200 with what the page shows, no sign-in, never a secret or a variable's value:
+  ```json
+  {"app": "folio", "stack": "typescript", "run": "mirror",
+   "parts": {"web": "running", "api": "running", "database": "running", "worker": "configured",
+             "signin": "configured", "email": "configured"},
+   "database": {"migrations": 1}, "checks": {"smoke": 1, "invariants": 1}}
+  ```
+  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `stack` is the starter's own name. `CONF:welcome` (the answer's `app` is the manifest's name, and nothing in it matches a variable's value)
+- **APP-9:** `run` says where this process runs, from what the platform sets and an app can't fake:
+
+  | `run` | When | The page says |
+  | - | - | - |
+  | `mirror` | `AGENTCLOUD_MIRROR` is set (agc up, `packages/cli/src/mirror.ts`) | "Running on this machine", with the address the browser is on. `<app>.agent.cloud` is shown as where `agc ship` releases it, with no claim about whether it's been released. |
+  | `live` | `AGC_RUN=live` (agent.cloud sets it on a release's pods after the app's own env, `packages/runner/src/release.ts` podEnv) | "Live at" the address the browser is on. |
+  | `rehearsal` | `AGC_RUN=rehearsal` | "A rehearsal of a release, not live yet." |
+  | `local` | none of these | "Running outside agent.cloud." |
+
+  `AGENTCLOUD_MIRROR` wins over `AGC_RUN`. The page says "live", "released" or "public" only when `run` is `live`. The progress line (started, building, released) marks "released" done only when `run` is `live`. `CONF:welcome-run` (the app started with each of the four environments answers each `run`), `review` (the page's words per `run`)
+- **APP-10:** Every part the page marks "running" is checked when the page asks; the rest say "configured" or "not set up", never "running":
+  - `web` and `api` are `running`: the page loaded, and `/api/welcome` answered.
+  - `database` is `running` only when `SELECT count(*) FROM agentcloud_migrations` answers within 2 s, and `database.migrations` is that count. Otherwise it's `unreachable`, and the answer is still 200. `/api/health` still never touches the database (PROC-3): the platform probes health every 2 s, and only a person opening the page runs this query.
+  - `worker` is `configured` when the manifest has `[service.worker]`. Nothing checks that it's running: the worker holds no connection between polls (JOB-4), so a heartbeat would keep the database awake.
+  - `signin` and `email` are `configured` when `AGC_AUTH_URL` and `AGC_EMAIL_URL` are set, and `not set up` otherwise.
+  - `checks` counts the manifest's `[[check.smoke]]` and `[[check.invariant]]` tables, read with the name.
+
+  `CONF:welcome` (with the fake database up: `database` is `running`, and `migrations` matches `agentcloud_migrations`; with it stopped: `unreachable`, still 200, and `/api/health` still 200)
+- **APP-11:** Each part's stack line is the starter's own:
+  - TypeScript: web "React 19 + Vite 8", API "Hono on Node 24".
+  - Python: web "React 19 + Vite 8", API "FastAPI on Python 3.12".
+  - Both: database "Postgres 18"; the worker is the manifest's `[service.worker] command`.
+
+  `review`
+- **APP-12:** The welcome page and the Notes example are both the agent's to remove. Nothing else depends on them: no table or migration is the welcome page's own, and `/api/welcome` is its only route. The page links to the platform guide (`https://agent.cloud/agents.md`) and names `AGENTS.md` in the app's folder as the agent's instructions. `LINT:app-pages` (no migration names the welcome page), `review`
+
 ## 12. The conformance descriptor
 
 Auto-reload (DEV-2 to DEV-4) can only be proven by editing a real file, so each starter says which, in `conformance.toml` at its root. `agc init` doesn't copy this file.
@@ -151,12 +194,12 @@ replace = "status: 'reloaded'"
 url = "/api/health"
 expect = "reloaded"
 
-[reload.ui]      # the same, for a UI module the dev server serves
+[reload.ui]      # the same, for a UI module the dev server serves: the welcome page, the page a person edits first
 file = "web/src/App.tsx"
-find = "Your notes"
-replace = "Your reloaded notes"
+find = "is ready to build"
+replace = "is ready to rebuild"
 url = "/src/App.tsx"
-expect = "Your reloaded notes"
+expect = "is ready to rebuild"
 
 [dev]            # run once in a fresh copy before `dev` (DEV-5): the one install command the README gives
 setup = "npm ci"
