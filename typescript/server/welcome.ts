@@ -38,27 +38,34 @@ const iso = (s: string | undefined) => {
   return Number.isFinite(t) ? new Date(t).toISOString() : null;
 };
 
-// APP-10: the database check. Its own pool of one connection, one probe at a time shared by every caller, and each result
-// kept for 60 s, so a public page fetched by anyone wakes the database at most once a minute. /api/health never gets here.
-const probes = new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 1, idleTimeoutMillis: 1_000, connectionTimeoutMillis: 2_000 });
-probes.on('error', () => {}); // a lost probe connection is just the next probe's "not verified"
+// APP-10: the database check. Its own connection for each probe, one probe at a time shared by every caller, and each
+// result kept for 60 s, so a public page fetched by anyone wakes the database at most once a minute. A probe that hasn't
+// answered in 2 s is torn down, connection and all, so nothing it started outlives it. /api/health never gets here.
 let last: { at: number; result: Database } | undefined;
 let running: Promise<Database> | undefined;
 
 async function probe(): Promise<Database> {
   const checked = () => new Date().toISOString();
+  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+  client.on('error', () => {}); // a torn-down or lost connection is just this probe's "not verified"
   let timer: NodeJS.Timeout | undefined;
   const timeout = new Promise<'timeout'>((r) => { timer = setTimeout(() => r('timeout'), 2_000); });
   try {
-    const answer = await Promise.race([probes.query<{ n: string }>('SELECT count(*) AS n FROM agentcloud_migrations'), timeout]);
-    if (answer === 'timeout') return { state: 'not verified', reason: 'timeout', checked_at: checked() };
+    const answer = await Promise.race([client.connect().then(() => client.query<{ n: string }>('SELECT count(*) AS n FROM agentcloud_migrations')), timeout]);
+    if (answer === 'timeout') {
+      // Torn down, not awaited: a socket waiting on a frozen database is destroyed, and the query it carried with it.
+      (client as unknown as { connection?: { stream?: { destroy: () => void } } }).connection?.stream?.destroy();
+      return { state: 'not verified', reason: 'timeout', checked_at: checked() };
+    }
     return { state: 'running', migrations: Number(answer.rows[0]!.n), checked_at: checked() };
   } catch (e) {
     // Postgres answered with an error (no ledger yet, say): the database is there, the check failed. Otherwise no connection.
     const answered = typeof (e as { code?: unknown }).code === 'string' && /^[0-9A-Z]{5}$/.test((e as { code: string }).code);
-    const slow = /timeout/i.test((e as Error).message);
-    return { state: 'not verified', reason: answered ? 'query_failed' : slow ? 'timeout' : 'unreachable', checked_at: checked() };
-  } finally { clearTimeout(timer); }
+    return { state: 'not verified', reason: answered ? 'query_failed' : 'unreachable', checked_at: checked() };
+  } finally {
+    clearTimeout(timer);
+    void client.end().catch(() => {});
+  }
 }
 
 async function database(now = Date.now()): Promise<Database> {

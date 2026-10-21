@@ -72,8 +72,8 @@ const CHIP: Record<string, string> = {
   mirror: 'Running on this machine', live: 'Live at', rehearsal: 'A rehearsal of a release, not live yet.',
   preview: 'A preview, not live', unknown: "This page can't tell where it's running.",
 };
-const NOT_RELEASED = ['reserved, not released', 'Nothing is public yet', 'Your first release puts it at'];
-const RELEASED = ['Your next release replaces v'];
+const NOT_RELEASED = ['reserved, not released', 'Nothing was public when this copy started', 'nothing was released at'];
+const RELEASED = ['agc ship releases a new version there'];
 const CHECKED = '2026-10-21T04:00:00.000Z';
 const URL_ = 'https://folio.agent.cloud';
 const HOST = 'folio.agent.cloud';
@@ -145,9 +145,12 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       const reserved = f.run === 'mirror' && f.production !== null && f.production.version === null;
       const versioned = f.run === 'mirror' && f.production !== null && f.production.version !== null;
       for (const phrase of NOT_RELEASED) (reserved ? want : never)(p13, label, t, phrase);
-      if (versioned) want(p13, label, t, `Your next release replaces v${f.production!.version}`);
+      if (versioned) want(p13, label, t, `ran v${f.production!.version}: agc ship releases a new version`);
       else for (const phrase of RELEASED) never(p13, label, t, phrase);
       if (f.run === 'live') want(p13, label, t, 'Your next release replaces this one');
+      // APP-13: the worker is only configured, so nothing says it runs jobs; release lines on a mirror say they're from its start.
+      never(p13, label, t, /\bRuns background jobs\b/);
+      if (reserved || versioned) for (const m of t.match(/released at [^<.]*|ran v\d+/gi) ?? []) if (!t.includes('when this copy started') && !t.includes('When this copy started')) p13.push(`${label}: "${m}" without "when this copy started"`);
       // The app's address only from production.url, or the browser's when live: otherwise no <name>.agent.cloud at all.
       if (f.run !== 'live' && f.production === null) {
         never(p13, label, t, /\b[a-z0-9-]+\.agent\.cloud\b/);
@@ -435,14 +438,19 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
       const evil: Jar = new Map();
       const away = await signIn(env, via, evil, `away-${tag()}@example.test`, undefined, `/auth/sign-in?return_to=${encodeURIComponent('//evil.test/x')}`);
       const awayLoc = away.callback?.headers.get('location') ?? '';
-      const awayOk = !!awayLoc && new URL(awayLoc, env.base(via)).origin === new URL(env.base(via)).origin;
+      // A browser drops a tab from a URL, so `/<tab>/evil.test` would be `//evil.test`: it must stay on this app too.
+      const tabbed = await signIn(env, via, new Map(), `tab-${tag()}@example.test`, undefined, `/auth/sign-in?return_to=${encodeURIComponent('/\t/evil.test')}`);
+      const tabLoc = tabbed.callback?.headers.get('location') ?? '';
+      const stays = (l: string) => !!l && !/[\u0000-\u001f]/.test(l) && new URL(l, env.base(via)).origin === new URL(env.base(via)).origin;
+      const awayOk = stays(awayLoc) && stays(tabLoc);
       const ok = !got.problem && !!landed && landed.origin === new URL(env.base(via)).origin && landed.pathname === '/notes' && page?.status === 200 && me.status === 200 && awayOk;
-      out.set('CONF:signin-return', (ok ? pass : fail)(got.problem ?? `the callback answered ${got.callback?.status} to ${loc || 'nowhere'}; /notes then ${page?.status ?? 'not fetched'}, /api/me ${me.status}; return_to=//evil.test landed at ${awayLoc || 'nowhere'}${awayOk ? ' (this app)' : ' (off this app)'}`));
+      out.set('CONF:signin-return', (ok ? pass : fail)(got.problem ?? `the callback answered ${got.callback?.status} to ${loc || 'nowhere'}; /notes then ${page?.status ?? 'not fetched'}, /api/me ${me.status}; return_to=//evil.test landed at ${awayLoc || 'nowhere'}, /<tab>/evil.test at ${JSON.stringify(tabLoc) || 'nowhere'}${awayOk ? ' (both this app)' : ' (off this app)'}`));
     }
 
     // APP-10: with the database frozen, a fresh process says not verified (timeout) within 3 s, and health still answers.
     await env.pauseDb();
     dbPaused = true;
+    const frozenAt = Date.now();
     const frozen = await call(paused, '/api/welcome', 10_000);
     const health = await call(paused, '/api/health', 2_000);
     const fdb = (frozen.json?.database ?? {}) as Record<string, unknown>;
@@ -465,9 +473,18 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     await env.unpauseDb();
     dbPaused = false;
 
+    // APP-10: a probe torn down at its timeout leaves nothing behind: once the frozen result expires, the database back,
+    // the next probe answers running at once, not queued behind the frozen one.
+    const frozenDone = typeof fdb.checked_at === 'string' ? Date.parse(fdb.checked_at) : frozenAt + 3_000; // cached from when it finished
+    const recoverWait = frozenDone + 61_000 - Date.now();
+    if (recoverWait > 0) await sleep(recoverWait);
+    const recovered = await call(paused, '/api/welcome', 10_000);
+    const rparts = (recovered.json?.parts ?? {}) as Record<string, string>;
+    if (!(recovered.status === 200 && recovered.ms <= 3000 && rparts.database === 'running')) p10.push(`after the frozen probe expired, database back: ${recovered.status} in ${recovered.ms} ms, ${rparts.database ?? 'no state'}`);
+
     out.set('CONF:welcome', (p8.length || p10.length ? fail : pass)([...p8, ...p10].slice(0, 4).join('; ') || 'the answer, its secrets and its database probe', {
       'APP-8': verdict(!p8.length, p8.length ? p8.join('; ') : `exactly APP-8\u2019s fields in every case; app is the mounted manifest\u2019s ${name}; a sentinel in an env var, AGC_AUTH_URL and the worker\u2019s command, and the app\u2019s tokens and database password, appear in no answer`),
-      'APP-10': verdict(!p10.length, p10.length ? p10.join('; ') : `database running with ${ledger} migrations (the ledger\u2019s count); frozen: not verified (timeout) in ${frozen.ms} ms, health ${health.status}; ${burstEvidence}; after 60 s frozen: not verified, checked later; email with one half: not set up; ${signinSeen.join('; ')}`),
+      'APP-10': verdict(!p10.length, p10.length ? p10.join('; ') : `database running with ${ledger} migrations (the ledger\u2019s count); frozen: not verified (timeout) in ${frozen.ms} ms, health ${health.status}; ${burstEvidence}; after 60 s frozen: not verified, checked later; frozen probe expired, database back: running in ${recovered.ms} ms; email with one half: not set up; ${signinSeen.join('; ')}`),
     }));
     out.set('CONF:welcome-run', (p9.length ? fail : pass)(p9.length ? p9.join('; ') : `${seen.sort().join('; ')}; production as expected in each`));
     return out;

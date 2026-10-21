@@ -54,7 +54,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
           <h1 id="hero-h" className="title up d2">{app} is ready to build.</h1>
           <p className="lede up d3">
             This is the agent.cloud starter: a web app, an API, a Postgres database and a background worker, wired together{run === 'mirror' ? ' and running on your machine' : ''}.
-            {unreleased ? ' Nothing is public yet.' : ''} Tell your agent what to build, and this page becomes your app.
+            {unreleased ? ' Nothing was public when this copy started.' : ''} Tell your agent what to build, and this page becomes your app.
           </p>
           <ol className="steps up d4" aria-label={`Where ${app} is`}>
             <li className="done"><Check size={17} />Started</li>
@@ -98,7 +98,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
         <section className="running" aria-labelledby="run-h">
           <div className="head">
             <h2 id="run-h">What’s running</h2>
-            <p>{run === 'mirror' ? `Wired together on your machine.${unreleased ? ' Nothing is public yet.' : ''}` : run === 'live' ? 'Wired together on agent.cloud.' : 'Wired together.'}</p>
+            <p>{run === 'mirror' ? 'Wired together on your machine.' : run === 'live' ? 'Wired together on agent.cloud.' : 'Wired together.'}</p>
           </div>
           <ul className="diagram" aria-label="Browser to web to API to Postgres; the worker also uses Postgres">
             <li className="node browser">
@@ -113,7 +113,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
             <Wire n={3} />
             <Node name="Database" color="orange" state={facts?.parts.database} stackLine="Postgres 18">{facts ? databaseLine(facts, now) : null}</Node>
             <Wire n={4} rev />
-            <Node name="Worker" color="blue" state={facts?.parts.worker} stackLine={stack.worker}>Runs background jobs and sends email through agent.cloud.</Node>
+            <Node name="Worker" color="blue" state={facts?.parts.worker} stackLine={stack.worker}>{facts?.parts.worker === 'not set up' ? 'No worker in agentcloud.toml.' : 'Set up to run background jobs and send email through agent.cloud.'}</Node>
           </ul>
           <div className="extras">
             <div className="card extra">
@@ -175,11 +175,11 @@ function chips(facts: Facts, here: string, prod: Facts['production']): ReactNode
   }
 }
 
-// APP-13: what `agc ship` does next, claiming only what agent.cloud said.
+// APP-13: what `agc ship` does next. On a mirror agc's word on production is from when this copy started, so it says so.
 function shipLine(run: Facts['run'] | undefined, prod: Facts['production'], where: string | null): string {
   if (run === 'live') return 'Your next release replaces this one.';
-  if (prod && prod.version === null) return `Your first release puts it at ${where}.`;
-  if (prod && prod.version !== null) return `Your next release replaces v${prod.version} at ${where}.`;
+  if (prod && prod.version === null) return `When this copy started, nothing was released at ${where}: agc ship releases it there.`;
+  if (prod && prod.version !== null) return `When this copy started, ${where} ran v${prod.version}: agc ship releases a new version there.`;
   return 'agc ship releases it.';
 }
 

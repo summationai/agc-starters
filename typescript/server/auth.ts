@@ -16,8 +16,14 @@ const { AGC_AUTH_URL, AGC_AUTH_TOKEN } = required('AGC_AUTH_URL', 'AGC_AUTH_TOKE
 const STATE = onMirror ? 'auth_state' : '__Host-auth_state';
 const SESSION = onMirror ? 'session' : '__Host-session';
 const RETURN = onMirror ? 'auth_return' : '__Host-auth_return';
-// AUTH-1: where to land after signing in: a path on this app only, never another site (`//evil.test` is a host).
-const local = (path: string | undefined) => (path && /^\/(?![/\\])/.test(path) ? path : '/');
+// AUTH-1: where to land after signing in: a path on this app only, never another site. `//evil.test` is a host, and a
+// browser drops tabs and newlines from a URL, so `/<tab>/evil.test` is one too: refuse control characters and
+// backslashes, then keep only what resolves on this app's own origin.
+const local = (path: string | undefined) => {
+  if (!path || !path.startsWith('/') || /[\u0000-\u001f\u007f\\]/.test(path)) return '/';
+  const url = new URL(path, 'https://app.invalid');
+  return url.origin === 'https://app.invalid' ? url.pathname + url.search + url.hash : '/';
+};
 const DAY = 86_400;
 
 export interface User { id: string; email: string | null; name: string | null }

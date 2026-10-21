@@ -35,8 +35,12 @@ def _hash(token: str) -> str:
 
 
 def _local(path: str | None) -> str:
-    """AUTH-1: where to land after signing in: a path on this app only, never another site (`//evil.test` is a host)."""
-    return path if path and re.match(r"/(?![/\\])", path) else "/"
+    """AUTH-1: where to land after signing in: a path on this app only, never another site. `//evil.test` is a host, and
+    a browser drops tabs and newlines from a URL, so `/<tab>/evil.test` is one too: refuse control characters and
+    backslashes outright."""
+    if not path or not re.match(r"/(?!/)", path) or re.search(r"[\x00-\x1f\x7f\\]", path):
+        return "/"
+    return path
 
 
 def _cookie(response: Response, name: str, value: str, max_age: int) -> None:
