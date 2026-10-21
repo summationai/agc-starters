@@ -143,7 +143,7 @@ These rules bind the starters in this repo, not the apps grown from them: once a
   `LINT:checks`, `CONF:smoke`
 - **APP-6:** A `seed.sql`, declared as `[data.db] seed = "seed.sql"`, inserts one demo person (a fixed uuid, `demo@example.test`, "Demo Person") and three notes for them, every insert `ON CONFLICT DO NOTHING`, touching only tables the migrations create and no DDL, in under 200 lines. agc runs it once on a mirror that starts empty, after the migrations (agent.cloud's `docs/specs/seed-data.md`); it never runs in production. `LINT:seed`, `CONF:seed` (after the migrations, the seed applies on the fake database; signed in as the demo person's id, `GET /api/notes` answers exactly those three notes; applying it a second time changes nothing)
 
-### The welcome page (APP-7 to APP-12)
+### The welcome page (APP-7 to APP-13)
 
 The welcome page is frame 0 of every app: what a person sees the first time `agc up` opens it, before their agent has built anything. It must never claim more than is true. In particular, it never says the app is live before its first release.
 
@@ -187,6 +187,26 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
 
   `review`
 - **APP-12:** The welcome page and the Notes example are both the agent's to remove. Nothing else depends on them: no table or migration is the welcome page's own, and `/api/welcome` is its only route. The page links to the platform guide (`https://agent.cloud/agents.md`) and names `AGENTS.md` in the app's folder as the agent's instructions. Its header names the starter by stack ("TypeScript starter", "Python starter"), with no version, and it has no console link. `LINT:app-pages` (no migration names the welcome page), `review`
+
+- **APP-13:** The welcome page and Notes follow rc's design in [`design/welcome/`](design/welcome/): the light and dark screenshots, the Notes screenshot, and the two mockup pages, which hold the exact colors, sizes and spacing. The starter rebuilds them in its own React and CSS; it doesn't copy the mockup's markup. It keeps:
+  - the agent.cloud mark;
+  - the status chips (APP-9);
+  - the progress line;
+  - the "Tell your agent what to build" card, with its Copy prompt button and highlighted placeholders;
+  - the `agc up`, `agc check` and `agc ship` cards;
+  - "What's running" as Browser → Web → API → Database ← Worker, with Sign-in and Checks below;
+  - the Notes example card;
+  - the footer.
+
+  Where the mockup and these rules differ, the rules win:
+  - Every part's label comes from `/api/welcome` (APP-10), never the mockup's text: the Worker and Sign-in say "configured" or "not set up", and never "running".
+  - The chips come from APP-9.
+  - There's no console link.
+  - The footer names the stack ("TypeScript starter"), with no version.
+
+  Both themes follow `prefers-color-scheme`. Fonts are set in one CSS variable each, for the text and for code, so changing them is a one-line edit.
+
+  Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link and a version are absent), `review` (against the screenshots)
 
 ## 12. The conformance descriptor
 
