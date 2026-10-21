@@ -117,7 +117,11 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 
 ## 11. The starter app
 
-Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it: people sign in, keep notes, and get an email for each note. These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the notes can go.
+Every starter is the same small app, so the shared UI works with every stack and the conformance suite can drive it. It has two pages:
+- a welcome page at `/`, which says truthfully where the app runs and what's working;
+- a Notes example at `/notes`, where people sign in, keep notes, and get an email for each note.
+
+These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the welcome page and the notes can go.
 
 - **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns. `LINT:migrations`
 - **APP-2:** `GET /api/notes` answers the signed-in person's notes, newest first, as `[{id, title, created_at}]`. Signed out, it answers 401. `CONF:app`
@@ -139,6 +143,74 @@ Every starter is the same small app, so the shared UI works with every stack and
   `LINT:checks`, `CONF:smoke`
 - **APP-6:** A `seed.sql`, declared as `[data.db] seed = "seed.sql"`, inserts one demo person (a fixed uuid, `demo@example.test`, "Demo Person") and three notes for them, every insert `ON CONFLICT DO NOTHING`, touching only tables the migrations create and no DDL, in under 200 lines. agc runs it once on a mirror that starts empty, after the migrations (agent.cloud's `docs/specs/seed-data.md`); it never runs in production. `LINT:seed`, `CONF:seed` (after the migrations, the seed applies on the fake database; signed in as the demo person's id, `GET /api/notes` answers exactly those three notes; applying it a second time changes nothing)
 
+### The welcome page (APP-7 to APP-13)
+
+The welcome page is frame 0 of every app: what a person sees the first time `agc up` opens it, before their agent has built anything. It must never claim more than is true. In particular, it never says the app is live before its first release.
+
+- **APP-7:** `/` serves the welcome page, and `/notes` serves the Notes example: sign-in, the person's notes and the add form, as before. Both are routes of the one UI bundle, so a reload of either answers `index.html` (PROC-2). APP-2 to APP-6 stand unchanged. The Notes page says it's an example the agent removes once the app takes shape, and signing in from it returns to `/notes` (`/auth/sign-in?return_to=/notes`, AUTH-1). `CONF:welcome-copy` (the stack's own UI modules rendered with `react-dom/server`: `/` renders the welcome page and `/notes` renders Notes, each with its own text, so a missing route fails even though the SPA fallback answers HTML), `CONF:signin-return` (signing in through `/auth/sign-in?return_to=/notes` on the fake platform ends at `/notes`)
+- **APP-8:** `GET /api/welcome` answers 200 with what the page shows, no sign-in, never a secret or a variable's value:
+  ```json
+  {"app": "folio", "stack": "typescript", "run": "mirror",
+   "parts": {"web": "running", "api": "running", "database": "running", "worker": "configured",
+             "signin": "configured", "email": "configured"},
+   "database": {"migrations": 1, "checked_at": "2026-10-21T04:00:00Z"},
+   "checks": {"smoke": 1, "invariants": 1}, "preview_expires_at": null,
+   "production": {"url": "https://folio.agent.cloud", "version": null}}
+  ```
+  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `stack` is the starter's own name. The answer has exactly the fields above. `run` and the part states are derived from the manifest and the environment (APP-9, APP-10); `preview_expires_at` is `AGC_PREVIEW_EXPIRES_AT` when it parses as a timestamp, re-written as ISO 8601 UTC, and `null` otherwise. `production` is what agc tells a mirror about the app (agent.cloud's mirror-release-state spec, MREL): on a mirror, when `AGENTCLOUD_APP_URL` is an `https://` origin and `AGENTCLOUD_RELEASED` is set, `{"url": <that origin>, "version": <the number, or null when it's empty>}`; otherwise `null`, meaning unknown. The app's public address is public, so it may be returned. No raw command, path, other URL, token or other value from the manifest or the environment is returned. The page's stack lines are fixed labels in the UI (APP-11). `CONF:welcome` (the answer has exactly these fields; its `app` is the manifest's name; with a sentinel secret in an environment variable, in `AGC_AUTH_URL` and in `[service.worker] command`, the answer contains none of them)
+- **APP-9:** `run` says where this process runs, from what the platform sets and an app can't fake:
+
+  | `run` | When | The page says |
+  | - | - | - |
+  | `mirror` | `AGENTCLOUD_MIRROR` is set (agc up, `packages/cli/src/mirror.ts`) | "Running on this machine", with the address the browser is on, and then, from `production` (APP-8): "`<url>` reserved, not released" when `version` is `null`; "live at `<url>` (v`<version>`) · this is your local copy" when it's a number; and, when `production` is `null`, "`agc ship` releases it", with no address and no claim either way, since only agent.cloud knows the app's address (a target's can differ). agc reports production as of when the mirror's processes started (MREL-3), so the released and not-released lines add "when this copy started". |
+  | `live` | `AGC_RUN=live` (agent.cloud sets it on a release's pods after the app's own env, `packages/runner/src/release.ts` podEnv) | "Live at" the address the browser is on. |
+  | `rehearsal` | `AGC_RUN=rehearsal` | "A rehearsal of a release, not live yet." |
+  | `preview` | `AGC_PREVIEW_EXPIRES_AT` is set (agent.cloud's managed previews, `packages/runner/src/preview-runtime.ts`, which pass neither of the above) | "A preview, not live", with when it expires. |
+  | `unknown` | none of these | "This page can't tell where it's running." |
+
+  The first row that matches wins, top to bottom, so a mirror is a mirror even when its shell happens to carry `AGC_RUN`. That order is only trustworthy because agent.cloud never lets `AGENTCLOUD_MIRROR` reach a release, rehearsal or preview pod: it is a reserved name that an app secret can't take, and the runner removes it from a pod's environment before setting `AGC_RUN` (agent.cloud's secrets and podEnv; this rule depends on that platform change landing first, and DEV-6's `Secure` cookies depend on it too). Only `live` claims the app is live: the page's status line reads "Live at <address>" only then, and the progress line (started, building, released) marks "released" done only then. Every other row's status line is exactly the words in the table, whose only use of "live" is "not live". `unknown` claims nothing, because a process with no signal could be anywhere. `CONF:welcome-run` (the app started with each row's variables, and with `AGENTCLOUD_MIRROR` and `AGC_RUN=live` both set, answers each `run`; on a mirror, `production` is `{url, version: null}` with `AGENTCLOUD_RELEASED` empty, `{url, version: 3}` with it `3`, and `null` with it absent or the URL not an `https://` origin; agent.cloud's own tests prove an app secret named `AGENTCLOUD_MIRROR` is refused and a release pod never carries one), `CONF:welcome-copy` (the page rendered for each `run` shows exactly that row's status line; "Live at" and a done "released" step appear for `live` and for no other row; a mirror rendered with each `production` shows its own line, and "live at" on a mirror only with a version)
+- **APP-10:** Every part the page marks "running" was checked, and the page says when; the rest say "configured" or "not set up", never "running":
+  - `web` and `api` are `running`: the page loaded, and `/api/welcome` answered.
+  - `database` is the last verified state: `running` only when `SELECT count(*) FROM agentcloud_migrations` answered within 2 s, with `database.migrations` that count. `database.checked_at` is when the last probe finished, whether it succeeded or failed, and `database.migrations` is `null` whenever the state is `not verified`. The page shows how long ago it was checked ("checked 40 s ago"). Otherwise it's `not verified`, with `database.reason`: `unreachable` (no connection), `timeout` (no answer in 2 s) or `query_failed` (an error, such as no ledger yet). The answer is always 200.
+  - The query is bounded, since `/api/welcome` is public once released and anyone can call it: in each process, at most one probe runs at a time, every caller during it shares its result, and a result (success or failure) is reused for 60 s. So each web process uses at most one connection for it and wakes the database at most once a minute, however often the page is fetched; there's no cache shared across processes. `/api/health` still never touches the database (PROC-3).
+  - `worker` is `configured` when the manifest has `[service.worker]`. Nothing checks that it's running: the worker holds no connection between polls (JOB-4), so a heartbeat would keep the database awake.
+  - `signin` is `configured` only when both `AGC_AUTH_URL` and `AGC_AUTH_TOKEN` are set, and `email` only when both `AGC_EMAIL_URL` and `AGC_EMAIL_TOKEN` are (agent.cloud passes them as pairs, and the app needs both); otherwise `not set up`.
+  - `checks` counts the manifest's `[[check.smoke]]` and `[[check.invariant]]` tables, read with the name.
+
+  `CONF:welcome` (with the fake database up: `database` is `running`, and `migrations` matches `agentcloud_migrations`; with it paused so queries hang: `not verified` with `timeout` within 3 s, still 200, and `/api/health` still 200; 50 concurrent calls open at most one connection, and calls within 60 s run no new query; after a cached `running`, the database stops and the next probe after 60 s answers `not verified` with a later `checked_at`; with only `AGC_AUTH_URL`, or only `AGC_AUTH_TOKEN`, `signin` is `not set up`, and the same for email)
+- **APP-11:** Each part's stack line is the starter's own:
+  - TypeScript: web "React 19 + Vite 8", API "Hono on Node 24", worker "a Node 24 worker".
+  - Python: web "React 19 + Vite 8", API "FastAPI on Python 3.12", worker "a Python 3.12 worker".
+  - Both: database "Postgres 18".
+
+  These are labels in the UI, chosen by `stack`, never the manifest's commands, which can carry arguments an app wouldn't publish.
+
+  `review`
+- **APP-12:** The welcome page and the Notes example are both the agent's to remove. Nothing else depends on them: no table or migration is the welcome page's own, and `/api/welcome` is its only route. The page links to the platform guide (`https://agent.cloud/agents.md`) and names `AGENTS.md` in the app's folder as the agent's instructions. Its header names the starter by stack ("TypeScript starter", "Python starter"), with no version, and it has no console link. `LINT:app-pages` (no migration names the welcome page), `review`
+
+- **APP-13:** The welcome page and Notes follow rc's design in [`design/welcome/`](design/welcome/): the light and dark screenshots, the Notes screenshot, and the two mockup pages, which hold the exact colors, sizes and spacing. The starter rebuilds them in its own React and CSS; it doesn't copy the mockup's markup. It keeps:
+  - the agent.cloud mark;
+  - the status chips (APP-9);
+  - the progress line;
+  - the "Tell your agent what to build" card, with its Copy prompt button and highlighted placeholders;
+  - the `agc up`, `agc check` and `agc ship` cards;
+  - "What's running" as Browser → Web → API → Database ← Worker, with Sign-in and Checks below;
+  - the Notes example card;
+  - the footer.
+
+  Where the mockup and these rules differ, the rules win:
+  - Every part's label comes from `/api/welcome` (APP-10), never the mockup's text: the Worker and Sign-in say "configured" or "not set up", and never "running".
+  - The chips come from APP-9.
+  - The app's address anywhere on the page (the `agc ship` card, the progress line) is `production.url` or the address the browser is on when `run` is `live`; otherwise the page names no address.
+  - Copy that says the app isn't released ("Nothing is public yet", "Your first release puts it at …", "Wired together on your machine. Nothing is public yet.") appears only on a mirror whose `production.version` is `null`. On a mirror with a version, it says the app is released ("Your next release replaces v<n>"); when `run` is `live`, which carries no version, it says so without one ("Your next release replaces this one"). With `production` `null`, it makes no claim either way ("agc ship releases it").
+  - The Notes page shows no email status per note: APP-2 returns none and the seed (APP-6) sends no mail. The screenshot's "emailed" and "email queued" badges are illustrative and aren't built. The page says once that each new note sends an email.
+  - There's no console link.
+  - The footer names the stack ("TypeScript starter"), with no version.
+
+  Both themes follow `prefers-color-scheme`. Fonts are rc's call for the starter, an exception to agent.cloud's Geist rule for its own pages: Bricolage Grotesque for text and JetBrains Mono for code, on both pages, loaded from Google Fonts as the design does, with system fallbacks so the page reads the same offline. They're set in one CSS variable each, so changing them is a one-line edit.
+
+  Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
+
 ## 12. The conformance descriptor
 
 Auto-reload (DEV-2 to DEV-4) can only be proven by editing a real file, so each starter says which, in `conformance.toml` at its root. `agc init` doesn't copy this file.
@@ -151,12 +223,12 @@ replace = "status: 'reloaded'"
 url = "/api/health"
 expect = "reloaded"
 
-[reload.ui]      # the same, for a UI module the dev server serves
+[reload.ui]      # the same, for a UI module the dev server serves: the welcome page, the page a person edits first
 file = "web/src/App.tsx"
-find = "Your notes"
-replace = "Your reloaded notes"
+find = "is ready to build"
+replace = "is ready to rebuild"
 url = "/src/App.tsx"
-expect = "Your reloaded notes"
+expect = "is ready to rebuild"
 
 [dev]            # run once in a fresh copy before `dev` (DEV-5): the one install command the README gives
 setup = "npm ci"
