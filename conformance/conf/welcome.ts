@@ -150,7 +150,10 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       if (f.run === 'live') want(p13, label, t, 'Your next release replaces this one');
       // APP-13: the worker is only configured, so nothing says it runs jobs; release lines on a mirror say they're from its start.
       never(p13, label, t, /\bRuns background jobs\b/);
-      if (reserved || versioned) for (const m of t.match(/released at [^<.]*|ran v\d+/gi) ?? []) if (!t.includes('when this copy started') && !t.includes('When this copy started')) p13.push(`${label}: "${m}" without "when this copy started"`);
+      // Each sentence that states production on a mirror carries the qualifier itself, not somewhere else on the page.
+      if (reserved || versioned) for (const sentence of t.split(/(?<=[.!?:])\s+|\s·\s/)) {
+        if (/nothing was released at|not released|ran v\d+|was public/i.test(sentence) && !/when this copy started/i.test(sentence)) p13.push(`${label}: "${sentence.trim().slice(0, 80)}" without "when this copy started"`);
+      }
       // The app's address only from production.url, or the browser's when live: otherwise no <name>.agent.cloud at all.
       if (f.run !== 'live' && f.production === null) {
         never(p13, label, t, /\b[a-z0-9-]+\.agent\.cloud\b/);
@@ -171,6 +174,13 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       }
       want(p7, label, t, 'is ready to build');
       never(p7, label, t, 'Your notes');
+    }
+
+    // APP-13: the Worker claims email only when email is set up.
+    {
+      const noMail = textOf(page(facts({ run: 'mirror', parts: { web: 'running', api: 'running', database: 'running', worker: 'configured', signin: 'configured', email: 'not set up' } })));
+      never(p13, 'worker configured, email not set up', noMail, /send email/i);
+      want(p13, 'worker and email configured', textOf(page(facts({ run: 'mirror' }))), 'send email through agent.cloud');
     }
 
     // APP-13: the Worker and Sign-in labels are what /api/welcome says, never "running".

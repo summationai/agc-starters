@@ -113,7 +113,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
             <Wire n={3} />
             <Node name="Database" color="orange" state={facts?.parts.database} stackLine="Postgres 18">{facts ? databaseLine(facts, now) : null}</Node>
             <Wire n={4} rev />
-            <Node name="Worker" color="blue" state={facts?.parts.worker} stackLine={stack.worker}>{facts?.parts.worker === 'not set up' ? 'No worker in agentcloud.toml.' : 'Set up to run background jobs and send email through agent.cloud.'}</Node>
+            <Node name="Worker" color="blue" state={facts?.parts.worker} stackLine={stack.worker}>{facts?.parts.worker === 'not set up' ? 'No worker in agentcloud.toml.' : `Set up to run background jobs${facts?.parts.email === 'configured' ? ' and send email through agent.cloud' : ''}.`}</Node>
           </ul>
           <div className="extras">
             <div className="card extra">
