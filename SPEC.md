@@ -202,14 +202,14 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   - Every part's label comes from `/api/welcome` (APP-10), never the mockup's text: the Worker and Sign-in say "configured" or "not set up", and never "running".
   - The chips come from APP-9.
   - The app's address anywhere on the page (the `agc ship` card, the progress line) is `production.url` or the address the browser is on when `run` is `live`; otherwise the page names no address.
-  - Copy that says the app isn't released ("Nothing is public yet", "Your first release puts it at …", "Wired together on your machine. Nothing is public yet.") appears only on a mirror whose `production.version` is `null`. With a version, or `run` `live`, it says the app is released ("Your next release replaces v<n>"). With `production` `null`, it makes no claim either way ("agc ship releases it").
+  - Copy that says the app isn't released ("Nothing is public yet", "Your first release puts it at …", "Wired together on your machine. Nothing is public yet.") appears only on a mirror whose `production.version` is `null`. On a mirror with a version, it says the app is released ("Your next release replaces v<n>"); when `run` is `live`, which carries no version, it says so without one ("Your next release replaces this one"). With `production` `null`, it makes no claim either way ("agc ship releases it").
   - The Notes page shows no email status per note: APP-2 returns none and the seed (APP-6) sends no mail. The screenshot's "emailed" and "email queued" badges are illustrative and aren't built. The page says once that each new note sends an email.
   - There's no console link.
   - The footer names the stack ("TypeScript starter"), with no version.
 
   Both themes follow `prefers-color-scheme`. Fonts are set in one CSS variable each, for the text and for code, so changing them is a one-line edit.
 
-  Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link and a version are absent; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
+  Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
 
 ## 12. The conformance descriptor
 
