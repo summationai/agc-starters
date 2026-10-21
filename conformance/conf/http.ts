@@ -30,10 +30,10 @@ export async function req(env: Env, app: Container, jar: Jar, method: string, pa
 export interface SignIn { start: Res; callback: Res | null; problem?: string }
 
 // Signs `who` in: GET /auth/sign-in, the fake platform's test page sends a code back, the app's callback finishes it.
-export async function signIn(env: Env, app: Container, jar: Jar, who: string, state?: (s: string) => string): Promise<SignIn> {
-  const start = await req(env, app, jar, 'GET', '/auth/sign-in');
+export async function signIn(env: Env, app: Container, jar: Jar, who: string, state?: (s: string) => string, from = '/auth/sign-in'): Promise<SignIn> {
+  const start = await req(env, app, jar, 'GET', from);
   const to = start.headers.get('location') ?? '';
-  if (!to.startsWith(`${env.authUrl}/authorize?`)) return { start, callback: null, problem: `GET /auth/sign-in answered ${start.status}${to ? ` to ${to}` : ''}, not a redirect to $AGC_AUTH_URL/authorize` };
+  if (!to.startsWith(`${env.authUrl}/authorize?`)) return { start, callback: null, problem: `GET ${from} answered ${start.status}${to ? ` to ${to}` : ''}, not a redirect to $AGC_AUTH_URL/authorize` };
   const minted = await env.fetchFor(app)(`${to}&as=${encodeURIComponent(who)}`, { redirect: 'manual', signal: AbortSignal.timeout(15_000) });
   const back = minted.headers.get('location');
   if (!back) return { start, callback: null, problem: `the fake platform answered ${minted.status}` };

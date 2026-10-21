@@ -1,11 +1,12 @@
 """Sign-in through agent.cloud: Google or an email link, no passwords (AGENTS.md "Sign-in").
-  GET  /auth/sign-in    a fresh state in a short cookie, then off to $AGC_AUTH_URL/authorize
-  GET  /auth/callback   check state FIRST, then trade the code (once, within a minute) for the person
+  GET  /auth/sign-in    a fresh state (and ?return_to, a path here) in short cookies, then off to $AGC_AUTH_URL/authorize
+  GET  /auth/callback   check state FIRST, then trade the code (once, within a minute) for the person, and go back
   POST /auth/sign-out   end this session
 Sessions are rows in the database (only a hash of the token is stored) and last a day."""
 
 import hashlib
 import os
+import re
 import secrets
 from typing import Any
 
@@ -23,6 +24,7 @@ AUTH_URL, AUTH_TOKEN = _env["AGC_AUTH_URL"], _env["AGC_AUTH_TOKEN"]
 # neighbour app can't plant a session or a sign-in state here. On a mirror (plain http) the prefix isn't allowed.
 STATE = "auth_state" if ON_MIRROR else "__Host-auth_state"
 SESSION = "session" if ON_MIRROR else "__Host-session"
+RETURN = "auth_return" if ON_MIRROR else "__Host-auth_return"
 DAY = 86_400
 
 router = APIRouter()
@@ -30,6 +32,15 @@ router = APIRouter()
 
 def _hash(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
+
+
+def _local(path: str | None) -> str:
+    """AUTH-1: where to land after signing in: a path on this app only, never another site. `//evil.test` is a host, and
+    a browser drops tabs and newlines from a URL, so `/<tab>/evil.test` is one too: refuse control characters and
+    backslashes outright."""
+    if not path or not re.match(r"/(?!/)", path) or re.search(r"[\x00-\x1f\x7f\\]", path):
+        return "/"
+    return path
 
 
 def _cookie(response: Response, name: str, value: str, max_age: int) -> None:
@@ -86,12 +97,13 @@ def signed_in(request: Request) -> dict[str, Any]:
 
 
 @router.get("/auth/sign-in")
-def sign_in() -> Response:
+def sign_in(return_to: str = "") -> Response:
     if EDGE:
         return RedirectResponse("/", status_code=302)  # AUTH-5: the target's gate already signed them in
     state = secrets.token_urlsafe(24)
     response = RedirectResponse(f"{AUTH_URL}/authorize?state={state}", status_code=302)
     _cookie(response, STATE, state, 600)
+    _cookie(response, RETURN, _local(return_to), 600)
     return response
 
 
@@ -99,10 +111,12 @@ def sign_in() -> Response:
 def callback(request: Request, code: str = "", state: str = "") -> Response:
     # State first: it's what stops someone else's code from signing this person in to the wrong account.
     expected = request.cookies.get(STATE, "")
+    back = _local(request.cookies.get(RETURN))
     # Bytes, not str: compare_digest refuses non-ASCII strings, and a crafted state would otherwise be a 500.
     if not expected or not secrets.compare_digest(state.encode(), expected.encode()):
         response: Response = PlainTextResponse("Sign-in expired. Try again.", status_code=400)
         response.delete_cookie(STATE, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
+        response.delete_cookie(RETURN, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
         return response
     r = httpx.post(f"{AUTH_URL}/token", json={"code": code}, headers={"authorization": f"Bearer {AUTH_TOKEN}"}, timeout=10)
     if r.status_code != 200:
@@ -121,8 +135,9 @@ def callback(request: Request, code: str = "", state: str = "") -> Response:
             (_hash(token), user["id"]),
         )
     log.info("signed in", user=user["id"])
-    response = RedirectResponse("/", status_code=302)
+    response = RedirectResponse(back, status_code=302)
     response.delete_cookie(STATE, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
+    response.delete_cookie(RETURN, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
     _cookie(response, SESSION, token, DAY)
     return response
 

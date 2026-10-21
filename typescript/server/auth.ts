@@ -15,6 +15,15 @@ const { AGC_AUTH_URL, AGC_AUTH_TOKEN } = required('AGC_AUTH_URL', 'AGC_AUTH_TOKE
 // neighbour app can't plant a session or a sign-in state here. On a mirror (plain http) the prefix isn't allowed.
 const STATE = onMirror ? 'auth_state' : '__Host-auth_state';
 const SESSION = onMirror ? 'session' : '__Host-session';
+const RETURN = onMirror ? 'auth_return' : '__Host-auth_return';
+// AUTH-1: where to land after signing in: a path on this app only, never another site. `//evil.test` is a host, and a
+// browser drops tabs and newlines from a URL, so `/<tab>/evil.test` is one too: refuse control characters and
+// backslashes, then keep only what resolves on this app's own origin.
+const local = (path: string | undefined) => {
+  if (!path || !path.startsWith('/') || /[\u0000-\u001f\u007f\\]/.test(path)) return '/';
+  const url = new URL(path, 'https://app.invalid');
+  return url.origin === 'https://app.invalid' ? url.pathname + url.search + url.hash : '/';
+};
 const DAY = 86_400;
 
 export interface User { id: string; email: string | null; name: string | null }
@@ -68,6 +77,7 @@ export function signIn(app: Hono<Env>) {
     if (EDGE) return c.redirect('/'); // AUTH-5: the target's gate already signed them in
     const state = randomBytes(24).toString('base64url');
     setCookie(c, STATE, state, { ...cookie, maxAge: 600 });
+    setCookie(c, RETURN, local(c.req.query('return_to')), { ...cookie, maxAge: 600 });
     return c.redirect(`${AGC_AUTH_URL}/authorize?state=${state}`);
   });
 
@@ -75,7 +85,9 @@ export function signIn(app: Hono<Env>) {
     // State first: it's what stops someone else's code from signing this person in to the wrong account.
     const expected = getCookie(c, STATE) ?? '';
     const state = c.req.query('state') ?? '';
+    const back = local(getCookie(c, RETURN));
     deleteCookie(c, STATE, { path: '/', secure: !onMirror });
+    deleteCookie(c, RETURN, { path: '/', secure: !onMirror });
     if (!expected || !same(state, expected)) return c.text('Sign-in expired. Try again.', 400);
     const res = await fetch(`${AGC_AUTH_URL}/token`, {
       method: 'POST', signal: AbortSignal.timeout(10_000),
@@ -95,7 +107,7 @@ export function signIn(app: Hono<Env>) {
     await pool.query(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')`, [hash(token), user.id]);
     setCookie(c, SESSION, token, { ...cookie, maxAge: DAY });
     log.info('signed in', { user: user.id });
-    return c.redirect('/');
+    return c.redirect(back);
   });
 
   app.post('/auth/sign-out', async (c: Context<Env>) => {

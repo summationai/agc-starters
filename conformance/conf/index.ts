@@ -10,6 +10,7 @@ import { run, sleep, until } from '../lib/sh.ts';
 import type { Stack } from '../lib/stack.ts';
 import { dev } from './dev.ts';
 import { cookieAttrs, type Jar, req, type Res, signIn, UUID } from './http.ts';
+import { welcomeApi, welcomeCopy } from './welcome.ts';
 
 const NAME = /^[a-z][a-z0-9_.-]{0,63}$/;
 const ENTITY = /^[A-Za-z0-9_-]{1,32}:[A-Za-z0-9_.-]{1,64}$/;
@@ -22,6 +23,7 @@ export const CONF_TESTS = [
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
+  'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -36,6 +38,9 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
   const env = new Env(stack);
   const allLogs: Container[] = [];
   try {
+    // APP-7, APP-9, APP-13: the stack's own welcome page and Notes, rendered from their facts; no image needed.
+    set('CONF:welcome-copy', await welcomeCopy(stack));
+
     // BLD-1, BLD-2, BLD-4, BLD-5: the default image, from exactly what agc ship sends, with the fake platform not yet up.
     opts.log('building the image with agent.cloud\u2019s default Dockerfile…');
     let built: Awaited<ReturnType<Env['build']>>;
@@ -162,7 +167,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const user = (me.json as { user?: { id?: string }; id?: string } | null);
       const id = user?.user?.id ?? user?.id ?? '';
       const auth3 = me.status === 200 && UUID.test(id);
-      const sessionLine = got.callback?.cookies.map(cookieAttrs).find((c) => c.value && c.name !== stateCookie?.name) ?? null;
+      // A cookie the callback deletes (Max-Age=0: the sign-in state, where to return to) is never the session.
+      const sessionLine = got.callback?.cookies.map(cookieAttrs).find((c) => c.value && c.name !== stateCookie?.name && c.lifetime !== 0) ?? null;
       // Sign-out on a session of its own, so the one signed in above stays live for the tests after this.
       const outJar: Jar = new Map();
       await signIn(env, web, outJar, `signout-${tag()}@example.test`);
@@ -484,6 +490,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const stopped = await env.stop(worker, 60);
       set('CONF:sigterm-worker', (stopped.seconds <= 50 && (stopped.exitCode === 0 || stopped.exitCode === 143) ? pass : fail)(`the worker exited ${stopped.exitCode} after ${stopped.seconds.toFixed(1)} s`));
     }
+
+    // APP-8, APP-9, APP-10, APP-7: GET /api/welcome on fresh processes, once web and worker are stopped, since it freezes
+    // the database for a minute.
+    for (const [k, v] of await welcomeApi(env, opts.log)) set(k, v);
 
     // DEV-*: auto-reload on a copy of the source.
     if (opts.dev) {
