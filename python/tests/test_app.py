@@ -235,7 +235,15 @@ def _set_cookies(r: httpx.Response) -> SimpleCookie:
 
 @pytest.mark.parametrize(
     ("return_to", "kept"),
-    [("/notes", "/notes"), ("//evil.test", "/"), ("/\\evil.test", "/"), ("/\t/evil.test", "/"), ("/\n/evil.test", "/"), ("https://evil.test/notes", "/"), ("", "/")],
+    [
+        ("/notes", "/notes"),
+        ("//evil.test", "/"),
+        ("/\\evil.test", "/"),
+        ("/\t/evil.test", "/"),
+        ("/\n/evil.test", "/"),
+        ("https://evil.test/notes", "/"),
+        ("", "/"),
+    ],
 )
 def test_auth_1_sign_in_keeps_only_a_path_on_this_app(return_to: str, kept: str) -> None:
     r = TestClient(app).get("/auth/sign-in", params={"return_to": return_to} if return_to else None, follow_redirects=False)
