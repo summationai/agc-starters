@@ -201,6 +201,7 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   Where the mockup and these rules differ, the rules win:
   - Every part's label comes from `/api/welcome` (APP-10), never the mockup's text: the Worker and Sign-in say "configured" or "not set up", and never "running".
   - The chips come from APP-9.
+  - The app's address anywhere on the page (the `agc ship` card, the progress line) is `production.url` or the address the browser is on when `run` is `live`; otherwise the page names no address.
   - There's no console link.
   - The footer names the stack ("TypeScript starter"), with no version.
 
