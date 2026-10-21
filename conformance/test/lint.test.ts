@@ -52,5 +52,8 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), '# agent.cloud: how to work on this app\n'))), 'fail');
   assert.equal(outcome('LINT:descriptor', await broken((d) => writeFileSync(join(d, 'server', 'health.ts'), "export const a = { status: 'ok' }; export const b = { status: 'ok' };\n"))), 'fail', 'find occurs twice');
   assert.equal(outcome('LINT:fixed-values', await broken((d) => writeFileSync(join(d, 'migrations', '0002_status.sql'), 'CREATE TABLE tasks (id uuid PRIMARY KEY, status text NOT NULL);\n'))), 'fail');
+  assert.equal(outcome('LINT:app-pages', await broken((d) => rmSync(join(d, 'web', 'src', 'Notes.tsx')))), 'fail', 'no Notes page');
+  assert.equal(outcome('LINT:app-pages', await broken((d) => writeFileSync(join(d, 'web', 'src', 'main.tsx'), "import { App } from './App.tsx';\n"))), 'fail', '/notes not routed');
+  assert.equal(outcome('LINT:app-pages', await broken((d) => writeFileSync(join(d, 'migrations', '0002_welcome.sql'), 'CREATE TABLE welcome_views (id uuid PRIMARY KEY);\n'))), 'fail', 'a migration for the welcome page');
   assert.equal(outcome('LINT:build-outputs', await broken((d) => writeFileSync(join(d, '.gitignore'), 'node_modules/\n'))), 'fail', 'dist not ignored');
 });

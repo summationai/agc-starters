@@ -20,7 +20,8 @@ server/worker.ts    the job loop, and one handler per job kind
 server/db.ts        the pool, and tx() for writes that belong together
 server/log.ts       JSON logs, and event() for workflow steps
 server/main.ts      production: the API plus web/dist          server/dev.ts  development: the API plus Vite
-web/src/            the UI (App.tsx, api.ts)
+server/welcome.ts   GET /api/welcome: the welcome page's facts; remove it with the welcome page
+web/src/            the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
 migrations/         schema changes, as plain SQL (agc migration new <slug>)
 seed.sql            a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```

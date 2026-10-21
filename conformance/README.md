@@ -21,7 +21,7 @@ Needs Node 24, Docker, and `openssl`. Exits 1 if any MUST rule fails. `CONFORMAN
    - `db`: Postgres 18 that only takes TLS, with a certificate for `db` from a throwaway CA. The app trusts that CA the way it trusts Neon's in production: Node through `NODE_EXTRA_CA_CERTS`, libpq through `SSL_CERT_FILE`.
    - `platform`: agent.cloud's test-mode sign-in and its email endpoint.
 4. **Run**: web and worker as the platform runs them, each with 512 MiB, a read-only filesystem except `/tmp`, and the platform's environment.
-5. **Probe** the `CONF:*` rules over HTTP, signals, logs and SQL. The checks run through agc's own `runFlow` and `checkSignInState`.
+5. **Probe** the `CONF:*` rules over HTTP, signals, logs and SQL. The checks run through agc's own `runFlow` and `checkSignInState`. The welcome page's copy (`conf/welcome.ts`) is the stack's own `Welcome` and `NotesView`, transpiled and rendered with `react-dom/server` for every run and production state.
 6. **Dev mode**: `[dev] setup`, then `dev` on a fresh copy. Then edit the files `conformance.toml` names and time the reloads.
 7. **Report**: every rule in SPEC.md, as PASS, FAIL, SKIP or REVIEW.
 

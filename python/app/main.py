@@ -20,6 +20,7 @@ from . import log
 from .auth import router as auth_router
 from .auth import signed_in
 from .db import pool, tx
+from .welcome import welcome as welcome_facts
 
 UI = Path("web/dist")
 
@@ -75,6 +76,12 @@ async def guard(request: Request, call_next: Callable[[Request], Awaitable[Respo
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+# The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
+@app.get("/api/welcome")
+async def welcome() -> dict[str, Any]:
+    return await welcome_facts(os.environ)
 
 
 app.include_router(auth_router)

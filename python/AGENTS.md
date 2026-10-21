@@ -23,7 +23,8 @@ app/db.py          the pool, and tx() for writes that belong together
 app/log.py         JSON logs, and event() for workflow steps
 app/__main__.py    starts uvicorn on 0.0.0.0:$PORT (python -m app)
 dev.sh             agc up's dev command: uvicorn --reload behind Vite
-web/src/           the UI (App.tsx, api.ts)
+app/welcome.py     GET /api/welcome: the welcome page's facts; remove it with the welcome page
+web/src/           the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
 migrations/        schema changes, as plain SQL (agc migration new <slug>)
 seed.sql           a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```

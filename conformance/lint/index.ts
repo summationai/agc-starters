@@ -26,6 +26,19 @@ function tables(s: Stack): Map<string, string> {
 const column = (body: string, name: string) => new RegExp(`(^|[,(\\s])"?${name}"?\\s+([a-z_ ]+?)(\\s|,|$)`, 'im').exec(body)?.[2]?.trim().toLowerCase() ?? null;
 const migrationSql = (s: Stack) => listMigrations(join(s.dir, s.app.db.migrations)).map((m) => m.sql).join('\n');
 
+// APP-7, APP-12: both pages are routes of the one bundle: main.tsx sends /notes to Notes and everything else to App.
+export function pageRoutes(s: Stack): string[] {
+  const problems: string[] = [];
+  for (const f of ['web/src/main.tsx', 'web/src/App.tsx', 'web/src/Notes.tsx']) if (!s.files.includes(f)) problems.push(`no ${f}`);
+  if (s.files.includes('web/src/main.tsx')) {
+    const main = readFileSync(join(s.dir, 'web/src/main.tsx'), 'utf8');
+    if (!/['"`]\/notes['"`]/.test(main)) problems.push('main.tsx never routes /notes');
+    if (!/\bNotes\b[^;]*from\s+['"]\.\/Notes(\.tsx)?['"]/.test(main)) problems.push('main.tsx doesn\u2019t import Notes from ./Notes.tsx');
+    if (!/\bApp\b[^;]*from\s+['"]\.\/App(\.tsx)?['"]/.test(main)) problems.push('main.tsx doesn\u2019t import App from ./App.tsx');
+  }
+  return problems;
+}
+
 export const lint: Record<string, (s: Stack) => TestResult> = {
   'LINT:manifest': (s) => {
     const web = table(table(s.raw.service).web);
@@ -218,5 +231,13 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
       demo ? '' : 'no demo@example.test / Demo Person',
     ].filter(Boolean);
     return (problems.length ? fail : pass)(problems.length ? problems.join('; ') : `${inserts.length} inserts into ${[...new Set(inserts)].join(', ')}, all ON CONFLICT DO NOTHING, ${lines} lines`);
+  },
+
+  // APP-7, APP-12: the welcome page and Notes are two routes of the one UI, and neither owns a table or a migration.
+  'LINT:app-pages': (s) => {
+    const problems = pageRoutes(s);
+    const named = listMigrations(join(s.dir, s.app.db.migrations)).filter((m) => /welcome/i.test(m.stem) || /welcome/i.test(m.sql)).map((m) => m.stem);
+    if (named.length) problems.push(`migrations name the welcome page: ${named.join(', ')}`);
+    return (problems.length ? fail : pass)(problems.length ? problems.join('; ') : 'main.tsx routes /notes to Notes and the rest to App; no migration names the welcome page');
   },
 };

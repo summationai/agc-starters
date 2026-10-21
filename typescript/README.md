@@ -1,6 +1,6 @@
 # agent.cloud starter: TypeScript
 
-A small, complete app to grow from. People sign in with Google or an email link, keep notes, and get an email for each note. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](https://github.com/summationai/agc-starters/blob/main/SPEC.md).
+A small, complete app to grow from. It opens on a welcome page that says truthfully where it runs and what's working, and its Notes example at `/notes` shows every piece together: people sign in with Google or an email link, keep notes, and get an email for each note. It covers everything an agent.cloud app needs: sign-in, a worker with a job queue, email, migrations, checks and observability. It passes the [starter spec](https://github.com/summationai/agc-starters/blob/main/SPEC.md).
 
 ## Run it
 
@@ -15,4 +15,4 @@ You only need Node 24. `agc up` doesn't install dependencies: run `npm ci` first
 
 ## Layout
 
-The server is `server/app.ts` (routes), `auth.ts` (sign-in), `worker.ts` (jobs) and `db.ts`. The UI is in `web/src/`. Schema changes go in `migrations/`, and the checks in `agentcloud.toml`. AGENTS.md says how to add a route, a table or a job.
+The server is `server/app.ts` (routes), `auth.ts` (sign-in), `worker.ts` (jobs) and `db.ts`. The UI is in `web/src/`: the welcome page in `App.tsx` (its facts come from `server/welcome.ts`, `GET /api/welcome`) and the Notes example in `Notes.tsx`. Both are yours to replace. Schema changes go in `migrations/`, and the checks in `agentcloud.toml`. AGENTS.md says how to add a route, a table or a job.

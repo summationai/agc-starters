@@ -11,10 +11,10 @@ expect = "reloaded"
 
 [reload.ui]
 file = "web/src/App.tsx"
-find = "Your notes"
-replace = "Your reloaded notes"
+find = "is ready to build"
+replace = "is ready to rebuild"
 url = "/src/App.tsx"
-expect = "Your reloaded notes"
+expect = "is ready to rebuild"
 
 [reload.worker]
 file = "app/worker.py"

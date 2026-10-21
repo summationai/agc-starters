@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
 import { event, log } from './log.ts';
+import { welcome } from './welcome.ts';
 
 export const app = new Hono<Env>();
 
@@ -46,6 +47,9 @@ app.use(async (c, next) => {
 
 // Health answers as soon as the server can serve, without touching the database: agent.cloud asks every 2 seconds.
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
+
+// The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
+app.get('/api/welcome', async (c) => c.json(await welcome()));
 
 // Only the API and sign-in look up the session: the UI's files never wait on the database.
 app.use('/api/*', session);

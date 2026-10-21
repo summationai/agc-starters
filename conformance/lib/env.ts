@@ -167,13 +167,13 @@ export class Env {
   }
 
   // Web as the platform runs it: the image's own CMD, 512 MiB, nothing writable but /tmp.
-  async web(name: string, env: Record<string, string> = this.appEnv(), opts: { alias?: boolean } = {}): Promise<Container> {
+  async web(name: string, env: Record<string, string> = this.appEnv(), opts: { alias?: boolean; mounts?: string[] } = {}): Promise<Container> {
     const full = `${name}-${this.id}`;
     this.containers.push(full);
     const port = this.stack.app.web.port;
     await this.docker(['run', '-d', '--name', full, '--network', this.net, ...(opts.alias === false ? [] : ['--network-alias', 'app']),
       '--memory', '512m', '--memory-swap', '512m', '--read-only', '--tmpfs', '/tmp:rw,size=64m', '-v', `${this.certs}:/certs:ro`,
-      '-p', `127.0.0.1::${port}`, ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]), this.image]);
+      ...(opts.mounts ?? []).flatMap((m) => ['-v', m]), '-p', `127.0.0.1::${port}`, ...Object.entries(env).flatMap(([k, v]) => ['-e', `${k}=${v}`]), this.image]);
     return { name: full, port: await this.publishedPort(full, port) };
   }
 
@@ -216,8 +216,8 @@ export class Env {
     const s = await this.inspect(c);
     return { seconds: (Date.now() - t0) / 1000, exitCode: s.exitCode };
   }
-  // When the worker ran its claim (JOB-2's SKIP LOCKED query), from the database's own statement log.
-  async claims(since = 0): Promise<number[]> {
+  // Every statement the database ran, from its own log, timestamped.
+  async statements(): Promise<{ at: number; text: string }[]> {
     const r = await run('docker', ['logs', `db-${this.id}`]);
     // A statement's later lines arrive as tab-indented continuation lines; simple and extended protocol both count.
     const statements: { at: number; text: string }[] = [];
@@ -225,7 +225,11 @@ export class Env {
       if (/LOG:\s+(statement|execute [^:]*):/.test(l)) statements.push({ at: Date.parse(`${l.slice(0, 23).replace(' ', 'T')}Z`), text: l });
       else if (l.startsWith('\t') && statements.length) statements[statements.length - 1]!.text += l;
     }
-    return statements.filter((st) => /SKIP LOCKED/i.test(st.text) && Number.isFinite(st.at) && st.at >= since).map((st) => st.at);
+    return statements;
+  }
+  // When the worker ran its claim (JOB-2's SKIP LOCKED query).
+  async claims(since = 0): Promise<number[]> {
+    return (await this.statements()).filter((st) => /SKIP LOCKED/i.test(st.text) && Number.isFinite(st.at) && st.at >= since).map((st) => st.at);
   }
   async ipOf(c: Container): Promise<string> {
     return (await run('docker', ['inspect', '-f', `{{(index .NetworkSettings.Networks "${this.net}").IPAddress}}`, c.name])).stdout.trim();
