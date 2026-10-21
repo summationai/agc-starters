@@ -207,7 +207,7 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   - There's no console link.
   - The footer names the stack ("TypeScript starter"), with no version.
 
-  Both themes follow `prefers-color-scheme`. Fonts are set in one CSS variable each, for the text and for code, so changing them is a one-line edit.
+  Both themes follow `prefers-color-scheme`. Fonts are rc's call for the starter, an exception to agent.cloud's Geist rule for its own pages: Bricolage Grotesque for text and JetBrains Mono for code, on both pages, loaded from Google Fonts as the design does, with system fallbacks so the page reads the same offline. They're set in one CSS variable each, so changing them is a one-line edit.
 
   Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
 
