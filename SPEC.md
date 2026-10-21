@@ -147,7 +147,7 @@ These rules bind the starters in this repo, not the apps grown from them: once a
 
 The welcome page is frame 0 of every app: what a person sees the first time `agc up` opens it, before their agent has built anything. It must never claim more than is true. In particular, it never says the app is live before its first release.
 
-- **APP-7:** `/` serves the welcome page, and `/notes` serves the Notes example: sign-in, the person's notes and the add form, as before. Both are routes of the one UI bundle, so a reload of either answers `index.html` (PROC-2). APP-2 to APP-6 stand unchanged. The Notes page says it's an example the agent removes once the app takes shape, and signing in from it returns to `/notes` (`/auth/sign-in?return_to=/notes`, AUTH-1). `CONF:app-pages` (`GET /` and `GET /notes` answer the UI's HTML), `LINT:app-pages` (the UI has both routes), `review`
+- **APP-7:** `/` serves the welcome page, and `/notes` serves the Notes example: sign-in, the person's notes and the add form, as before. Both are routes of the one UI bundle, so a reload of either answers `index.html` (PROC-2). APP-2 to APP-6 stand unchanged. The Notes page says it's an example the agent removes once the app takes shape, and signing in from it returns to `/notes` (`/auth/sign-in?return_to=/notes`, AUTH-1). `CONF:welcome-copy` (the stack's own UI modules rendered with `react-dom/server`: `/` renders the welcome page and `/notes` renders Notes, each with its own text, so a missing route fails even though the SPA fallback answers HTML), `CONF:signin-return` (signing in through `/auth/sign-in?return_to=/notes` on the fake platform ends at `/notes`)
 - **APP-8:** `GET /api/welcome` answers 200 with what the page shows, no sign-in, never a secret or a variable's value:
   ```json
   {"app": "folio", "stack": "typescript", "run": "mirror",
@@ -155,7 +155,7 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
              "signin": "configured", "email": "configured"},
    "database": {"migrations": 1}, "checks": {"smoke": 1, "invariants": 1}}
   ```
-  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `stack` is the starter's own name. `CONF:welcome` (the answer's `app` is the manifest's name, and nothing in it matches a variable's value)
+  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `stack` is the starter's own name. Nothing else from the manifest or the environment reaches the answer: no commands, paths, URLs or values. The page's stack lines are fixed labels in the UI (APP-11). `CONF:welcome` (the answer's `app` is the manifest's name; with a sentinel secret in an environment variable and in `[service.worker] command`, the answer contains neither)
 - **APP-9:** `run` says where this process runs, from what the platform sets and an app can't fake:
 
   | `run` | When | The page says |
@@ -163,21 +163,25 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   | `mirror` | `AGENTCLOUD_MIRROR` is set (agc up, `packages/cli/src/mirror.ts`) | "Running on this machine", with the address the browser is on. `<app>.agent.cloud` is shown as where `agc ship` releases it, with no claim about whether it's been released. |
   | `live` | `AGC_RUN=live` (agent.cloud sets it on a release's pods after the app's own env, `packages/runner/src/release.ts` podEnv) | "Live at" the address the browser is on. |
   | `rehearsal` | `AGC_RUN=rehearsal` | "A rehearsal of a release, not live yet." |
-  | `local` | none of these | "Running outside agent.cloud." |
+  | `preview` | `AGC_PREVIEW_EXPIRES_AT` is set (agent.cloud's managed previews, `packages/runner/src/preview-runtime.ts`, which pass neither of the above) | "A preview, not live", with when it expires. |
+  | `unknown` | none of these | "This page can't tell where it's running." |
 
-  `AGENTCLOUD_MIRROR` wins over `AGC_RUN`. The page says "live", "released" or "public" only when `run` is `live`. The progress line (started, building, released) marks "released" done only when `run` is `live`. `CONF:welcome-run` (the app started with each of the four environments answers each `run`), `review` (the page's words per `run`)
+  The first row that matches wins, top to bottom, so a mirror is a mirror whatever else is set. The page says "live", "released" or "public" only when `run` is `live`, and the progress line (started, building, released) marks "released" done only then. `unknown` claims nothing, because a process with no signal could be anywhere. `CONF:welcome-run` (the app started with each row's variables, and with `AGENTCLOUD_MIRROR` and `AGC_RUN=live` both set, answers each `run`), `CONF:welcome-copy` (the page rendered for each `run` shows that row's words, and "live", "released" or "public" appear only for `live`)
 - **APP-10:** Every part the page marks "running" is checked when the page asks; the rest say "configured" or "not set up", never "running":
   - `web` and `api` are `running`: the page loaded, and `/api/welcome` answered.
-  - `database` is `running` only when `SELECT count(*) FROM agentcloud_migrations` answers within 2 s, and `database.migrations` is that count. Otherwise it's `unreachable`, and the answer is still 200. `/api/health` still never touches the database (PROC-3): the platform probes health every 2 s, and only a person opening the page runs this query.
+  - `database` is `running` only when `SELECT count(*) FROM agentcloud_migrations` answered within 2 s, and `database.migrations` is that count. Otherwise it's `not verified`, with `database.reason`: `unreachable` (no connection), `timeout` (no answer in 2 s) or `query_failed` (an error, such as no ledger yet). The answer is always 200.
+  - The query is bounded, since `/api/welcome` is public once released and anyone can call it: at most one probe runs at a time, every caller during it shares its result, and a result is reused for 60 s. So it uses at most one connection and wakes the database at most once a minute however often the page is fetched. `/api/health` still never touches the database (PROC-3).
   - `worker` is `configured` when the manifest has `[service.worker]`. Nothing checks that it's running: the worker holds no connection between polls (JOB-4), so a heartbeat would keep the database awake.
   - `signin` and `email` are `configured` when `AGC_AUTH_URL` and `AGC_EMAIL_URL` are set, and `not set up` otherwise.
   - `checks` counts the manifest's `[[check.smoke]]` and `[[check.invariant]]` tables, read with the name.
 
-  `CONF:welcome` (with the fake database up: `database` is `running`, and `migrations` matches `agentcloud_migrations`; with it stopped: `unreachable`, still 200, and `/api/health` still 200)
+  `CONF:welcome` (with the fake database up: `database` is `running`, and `migrations` matches `agentcloud_migrations`; with it paused so queries hang: `not verified` with `timeout` within 3 s, still 200, and `/api/health` still 200; 50 concurrent calls open at most one connection, and calls within 60 s run no new query)
 - **APP-11:** Each part's stack line is the starter's own:
-  - TypeScript: web "React 19 + Vite 8", API "Hono on Node 24".
-  - Python: web "React 19 + Vite 8", API "FastAPI on Python 3.12".
-  - Both: database "Postgres 18"; the worker is the manifest's `[service.worker] command`.
+  - TypeScript: web "React 19 + Vite 8", API "Hono on Node 24", worker "a Node 24 worker".
+  - Python: web "React 19 + Vite 8", API "FastAPI on Python 3.12", worker "a Python 3.12 worker".
+  - Both: database "Postgres 18".
+
+  These are labels in the UI, chosen by `stack`, never the manifest's commands, which can carry arguments an app wouldn't publish.
 
   `review`
 - **APP-12:** The welcome page and the Notes example are both the agent's to remove. Nothing else depends on them: no table or migration is the welcome page's own, and `/api/welcome` is its only route. The page links to the platform guide (`https://agent.cloud/agents.md`) and names `AGENTS.md` in the app's folder as the agent's instructions. `LINT:app-pages` (no migration names the welcome page), `review`
