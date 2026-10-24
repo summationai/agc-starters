@@ -44,7 +44,7 @@ jobs:
       - name: the stack's own checks (TypeScript)
         if: matrix.stack == 'typescript'
         working-directory: typescript
-        run: npm ci && npx tsc --noEmit
+        run: npm ci && npx tsc --noEmit && npm test
       - uses: astral-sh/setup-uv@v6
         if: matrix.stack == 'python'
       - name: the stack's own checks (Python)

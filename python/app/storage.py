@@ -16,14 +16,31 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cache
 from typing import Any
+from urllib.parse import urlsplit
 
 import boto3
 from botocore.config import Config
+from botocore.credentials import RefreshableCredentials
 from botocore.exceptions import ClientError
 
 UPLOAD_SECONDS = 10 * 60  # STOR-2: an upload policy is valid for 10 minutes
 DOWNLOAD_SECONDS = 5 * 60  # STOR-3: a download link for at most 5 minutes
 NOT_ON_MIRROR = "This file isn't on this mirror"
+
+
+def _browser_url(url: str) -> str:
+    """STOR-6: change only the browser endpoint; retain the signed path and query byte for byte."""
+    gateway = os.environ.get("AGC_STORAGE_GATEWAY_URL")
+    if not gateway:
+        return url
+    endpoint = os.environ.get("AGC_STORAGE_ENDPOINT")
+    base = endpoint.rstrip("/") if endpoint else ""
+    if not base or not url.startswith(base + "/"):
+        raise ValueError("The signed storage URL does not match AGC_STORAGE_ENDPOINT.")
+    target = urlsplit(gateway)
+    if target.scheme != "https" or not target.netloc or target.username or target.password or target.query or target.fragment:
+        raise ValueError("AGC_STORAGE_GATEWAY_URL must be an HTTPS base without credentials, a query, or a fragment.")
+    return gateway.rstrip("/") + url[len(base) :]
 
 
 @dataclass(frozen=True)
@@ -94,12 +111,50 @@ def _client_for(_config: tuple[str, ...]) -> Any:
     )
 
 
+def _signing_client() -> Any:
+    """STOR-7: a private credential chain per browser signature, separate from backend clients."""
+    key_id, secret = os.environ.get("AGC_STORAGE_ACCESS_KEY_ID"), os.environ.get("AGC_STORAGE_SECRET_ACCESS_KEY")
+    if bool(key_id) != bool(secret):
+        raise ValueError("Set both AGC_STORAGE HMAC keys or neither.")
+    for attempt in range(2):
+        session = boto3.Session(aws_access_key_id=key_id, aws_secret_access_key=secret)
+        credentials = session.get_credentials()
+        if credentials is None:
+            raise RuntimeError("Storage credentials are not available.")
+        frozen = credentials.get_frozen_credentials()
+        if not isinstance(credentials, RefreshableCredentials) or not credentials.refresh_needed(11 * 60):
+            return session.client(
+                "s3",
+                region_name=os.environ.get("AGC_STORAGE_REGION") or "auto",
+                endpoint_url=os.environ.get("AGC_STORAGE_ENDPOINT") or None,
+                aws_access_key_id=frozen.access_key,
+                aws_secret_access_key=frozen.secret_key,
+                aws_session_token=frozen.token,
+                config=Config(
+                    signature_version="s3v4",
+                    s3={"addressing_style": "path"},
+                    request_checksum_calculation="when_required",
+                    response_checksum_validation="when_required",
+                ),
+            )
+        if attempt:
+            break
+    raise RuntimeError("Storage credentials have fewer than 11 minutes left after refresh.")
+
+
 _BAD = re.compile(r"[\x00-\x1f\x7f\\]")
 
 
 def _checked(key: str) -> str:
     """A key is the app's own relative name: no leading slash, no empty, `.` or `..` part, no control characters."""
-    if not isinstance(key, str) or not key or len(key) > 512 or _BAD.search(key) or any(p in ("", ".", "..") for p in key.split("/")):
+    if (
+        not isinstance(key, str)
+        or not key
+        or len(key) > 512
+        or "${" in key
+        or _BAD.search(key)
+        or any(p in ("", ".", "..") for p in key.split("/"))
+    ):
         raise ValueError(
             'A storage key is a relative name like "receipts/scan.pdf": '
             'no leading slash, no empty, "." or ".." part, at most 512 characters.'
@@ -113,13 +168,13 @@ def sign_upload(key: str) -> dict[str, Any]:
     10 minutes. Returns {"url", "fields", "key"}: the browser posts the fields and the file to url; the app records key."""
     name = f"{uuid.uuid4()}/{_checked(key)}"
     place = _place()
-    post = _client().generate_presigned_post(
+    post = _signing_client().generate_presigned_post(
         Bucket=place.bucket,
         Key=place.prefix + name,
         Conditions=[["content-length-range", 0, place.max_bytes]],
         ExpiresIn=UPLOAD_SECONDS,
     )
-    return {"url": post["url"], "fields": post["fields"], "key": name}
+    return {"url": _browser_url(post["url"]), "fields": post["fields"], "key": name}
 
 
 def sign_download(key: str, may_read: Callable[[], bool]) -> Download:
@@ -138,9 +193,10 @@ def sign_download(key: str, may_read: Callable[[], bool]) -> Download:
             return Download(status=404, error={"code": "not_on_mirror", "message": NOT_ON_MIRROR})
         if not place.fallback:
             return Download(status=404, error={"code": "not_found", "message": "There\u2019s no such file."})
-        bucket, object_key = place.fallback, key  # production's prefix is empty
-    url = s3.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": object_key}, ExpiresIn=DOWNLOAD_SECONDS)
-    return Download(url=url)
+        bucket, object_key = place.fallback, os.environ.get("AGC_STORAGE_FALLBACK_PREFIX", "") + key
+    signer = _signing_client()  # HEAD may have consumed part of the credential lifetime.
+    url = signer.generate_presigned_url("get_object", Params={"Bucket": bucket, "Key": object_key}, ExpiresIn=DOWNLOAD_SECONDS)
+    return Download(url=_browser_url(url))
 
 
 def _exists(s3: Any, bucket: str, key: str) -> bool:
