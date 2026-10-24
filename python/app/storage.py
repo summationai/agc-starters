@@ -161,6 +161,8 @@ def signDownload(key: str) -> str:  # noqa: N802 - same starter API in both lang
                 raise StorageNotFoundError() from error
             bucket = storage.fallback_bucket
             full_key = storage.scoped(storage.fallback_prefix, key)
+    # HEAD can take time. Reload the chain and check its lifetime immediately before the browser signature.
+    with closing(storage.client()) as s3:
         url = s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": full_key, "ResponseContentDisposition": "attachment"},

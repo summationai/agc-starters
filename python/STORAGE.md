@@ -132,6 +132,7 @@ The proposed input key, full prefixed key, and expiring URL cannot replace it.
 
 Backend reads, writes, multipart operations, and credential refresh continue through the app's own S3 SDK client.
 That client uses `AGC_STORAGE_ENDPOINT` directly. The browser gateway adapter does not wrap it.
+The POST file limit applies only to browser uploads. Backend multipart uploads keep the SDK's standard behavior.
 
 ## Verification and release
 

@@ -113,7 +113,11 @@ export async function signDownload(key: string): Promise<string> {
       bucket = c.fallbackBucket;
       fullKey = scoped(c.fallbackPrefix, key);
     }
-    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: bucket, Key: fullKey, ResponseContentDisposition: 'attachment' }), { expiresIn: 300 });
-    return browserUrl(url, c);
   } finally { s3.destroy(); }
+  // HEAD can take time. Recheck the lifetime immediately before the browser signature too.
+  const signer = await client(c);
+  try {
+    const url = await getSignedUrl(signer, new GetObjectCommand({ Bucket: bucket, Key: fullKey, ResponseContentDisposition: 'attachment' }), { expiresIn: 300 });
+    return browserUrl(url, c);
+  } finally { signer.destroy(); }
 }

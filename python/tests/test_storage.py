@@ -31,6 +31,7 @@ def store(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[dict[str,
     class Handler(BaseHTTPRequestHandler):
         def do_HEAD(self) -> None:
             state["requests"].append(f"HEAD {self.path}")
+            state["now"] += state.pop("advance_on_head", timedelta())
             self.send_response(state["status"])
             self.end_headers()
 
@@ -213,6 +214,12 @@ def test_sto_2_15_default_container_chain_rereads_token_and_refreshes_beyond_an_
         token.write_text("projected-token-3")
         backend.head_object(Bucket="own-bucket", Key="branch/task/backend")
     assert store["credentials"][-1] == "projected-token-3"
+    token.write_text("projected-token-4")
+    before_head = len(store["credentials"])
+    store["advance_on_head"] = timedelta(minutes=5)
+    download = signDownload("person/a.txt")
+    assert len(store["credentials"]) >= before_head + 2  # Reload after HEAD consumes five minutes of the first session.
+    assert parse_qs(urlsplit(download).query)["X-Amz-Security-Token"] == [f"token-{len(store['credentials'])}"]
     store["short"] = True
     with pytest.raises(RuntimeError, match="fewer than 11 minutes"):
         signUpload("person/a.txt")

@@ -16,6 +16,7 @@ let requests: string[] = [];
 let credentialCalls = 0;
 let short = false;
 let alwaysShort = false;
+let onHead: (() => void) | undefined;
 const authorizations: string[] = [];
 const server = createServer((req, res) => {
   if (req.url === '/credentials') {
@@ -30,6 +31,7 @@ const server = createServer((req, res) => {
     return;
   }
   requests.push(`${req.method} ${req.url}`);
+  if (req.method === 'HEAD' && onHead) { const advance = onHead; onHead = undefined; advance(); }
   res.writeHead(status);
   res.end();
 });
@@ -173,6 +175,13 @@ test('STO-2/15: default container credentials refresh below eleven minutes and b
     await backend.send(new HeadObjectCommand({ Bucket: 'own-bucket', Key: 'branch/task/backend' }));
     assert.equal(authorizations.at(-1), 'projected-token-2');
     assert.ok(requests.includes('HEAD /own-bucket/branch/task/backend'));
+    await writeFile(join(dir, 'token'), 'projected-token-3');
+    const beforeHead = credentialCalls;
+    onHead = () => clock.mock.mockImplementation(() => realNow + 66 * 60_000);
+    const download = await signDownload('person/a.txt');
+    assert.ok(credentialCalls > beforeHead); // Five minutes passed during HEAD: refresh before the GET signature.
+    assert.equal(authorizations.at(-1), 'projected-token-3');
+    assert.equal(new URL(download).searchParams.get('X-Amz-Security-Token'), `token-${credentialCalls}`);
     clock.mock.mockImplementation(() => realNow + 122 * 60_000);
     alwaysShort = true;
     await assert.rejects(signUpload('person/a.txt'), /fewer than 11 minutes/);
