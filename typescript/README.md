@@ -13,6 +13,11 @@ agc check && agc ship
 
 You only need Node 24. `agc up` doesn't install dependencies: run `npm ci` first.
 
+## User uploads
+
+[STORAGE.md](STORAGE.md) covers `signUpload` and `signDownload`, the authenticated `/api/uploads` example, and adoption by existing apps.
+The helpers return browser URLs for GCS, S3, and the customer file gateway. Run `npm test` for their synthetic tests.
+
 ## Layout
 
 The server is `server/app.ts` (routes), `auth.ts` (sign-in), `worker.ts` (jobs) and `db.ts`. The UI is in `web/src/`: the welcome page in `App.tsx` (its facts come from `server/welcome.ts`, `GET /api/welcome`) and the Notes example in `Notes.tsx`. Both are yours to replace. Schema changes go in `migrations/`, and the checks in `agentcloud.toml`. AGENTS.md says how to add a route, a table or a job.

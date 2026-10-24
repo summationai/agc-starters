@@ -13,5 +13,5 @@
     "lib": ["es2023", "dom"],
     "types": ["node"]
   },
-  "include": ["server", "web/src", "vite.config.ts"]
+  "include": ["server", "tests", "web/src", "vite.config.ts"]
 }

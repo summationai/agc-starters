@@ -14,3 +14,5 @@ Start an app from one with `agc init --stack typescript` or `agc init --stack py
 Each starter is the same small app: a welcome page at `/` that says truthfully where the app runs and what's working, and a Notes example at `/notes` where people sign in with Google or an email link, keep notes, and get an email for each note. It has sign-in, a job queue, email, migrations, checks, observability, graceful shutdown, auto-reload on a mirror, and an idle worker that lets the database sleep. Grow from there.
 
 Adding a stack (Rust, Java…)? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+For user uploads, see [the storage helper guide](typescript/STORAGE.md), also included in each starter release.

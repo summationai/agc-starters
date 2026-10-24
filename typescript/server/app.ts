@@ -8,6 +8,7 @@ import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
 import { event, log } from './log.ts';
 import { welcome } from './welcome.ts';
+import { signUpload, signDownload, StorageKeyError, StorageNotFoundError } from './storage.ts';
 
 export const app = new Hono<Env>();
 
@@ -75,6 +76,26 @@ const body = <T extends z.ZodType>(schema: T) => zValidator('json', schema, (res
 
 const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
 
+// STO-11: only keys go in Postgres. A row authorizes its owner; bytes go from the browser to storage.
+const UploadIn = z.object({ name: z.string().min(1).max(200).regex(/^[^\u0000-\u001f\u007f/\\]+$/) });
+app.post('/api/uploads', body(UploadIn), async (c) => {
+  const user = signedIn(c);
+  c.header('Cache-Control', 'no-store');
+  const post = await signUpload(`${user.id}/${c.req.valid('json').name}`);
+  await pool.query('INSERT INTO uploads (user_id, storage_key) VALUES ($1, $2)', [user.id, post.key]);
+  return c.json(post, 201);
+});
+app.get('/api/uploads/download', async (c) => {
+  const user = signedIn(c);
+  const key = c.req.query('key') ?? '';
+  // Authorization comes before HEAD or signing. Never accept a bucket, prefix, or URL from the browser.
+  const { rows } = await pool.query<{ storage_key: string }>(
+    'SELECT storage_key FROM uploads WHERE storage_key = $1 AND user_id = $2', [key, user.id]);
+  if (!rows[0]) throw new HTTPException(404, { message: 'No such file.' });
+  c.header('Cache-Control', 'no-store');
+  return c.json({ url: await signDownload(rows[0].storage_key) });
+});
+
 app.get('/api/notes', async (c) => {
   const user = signedIn(c);
   const { rows } = await pool.query('SELECT id, title, created_at FROM notes WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100', [user.id]);
@@ -113,6 +134,8 @@ if (process.env.AGENTCLOUD_CONFORMANCE === '1') {
 app.all('/api/*', (c) => c.json({ error: { code: 'not_found', message: 'No such API route.' } }, 404));
 
 app.onError((e, c) => {
+  if (e instanceof StorageKeyError) return c.json({ error: { code: 'bad_request', message: e.message } }, 400);
+  if (e instanceof StorageNotFoundError) return c.json({ error: { code: 'not_found', message: e.message } }, 404);
   if (e instanceof HTTPException) return c.json({ error: { code: 'http', message: e.message } }, e.status);
   log.error('request failed', { method: c.req.method, path: c.req.routePath, error: e.message, stack: e.stack });
   return c.json({ error: { code: 'internal', message: 'Something went wrong.' } }, 500);

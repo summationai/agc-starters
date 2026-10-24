@@ -20,6 +20,7 @@ from . import log
 from .auth import router as auth_router
 from .auth import signed_in
 from .db import pool, tx
+from .storage import StorageKeyError, StorageNotFoundError, signDownload, signUpload
 from .welcome import welcome as welcome_facts
 
 UI = Path("web/dist")
@@ -107,6 +108,41 @@ class NoteIn(BaseModel):
     """A new note's body. FastAPI checks it before add_note runs; one that doesn't fit answers 400 (bad_request below)."""
 
     title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class UploadIn(BaseModel):
+    name: Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^[^\x00-\x1f\x7f/\\]+$")]
+
+
+# STO-11: only keys go in Postgres. A row authorizes its owner; bytes go from the browser to storage.
+@app.post("/api/uploads", status_code=201)
+def upload(request: Request, body: UploadIn) -> Response:
+    user = signed_in(request)
+    post = signUpload(f"{user['id']}/{body.name}")
+    with pool.connection() as conn:
+        conn.execute("INSERT INTO uploads (user_id, storage_key) VALUES (%s, %s)", (user["id"], post["key"]))
+    return JSONResponse(post, 201, headers={"Cache-Control": "no-store"})
+
+
+@app.get("/api/uploads/download")
+def download(request: Request, key: str = "") -> Response:
+    user = signed_in(request)
+    # Authorization comes before HEAD or signing. The browser never selects a bucket, prefix, or URL.
+    with pool.connection() as conn:
+        row = conn.execute("SELECT storage_key FROM uploads WHERE storage_key = %s AND user_id = %s", (key, user["id"])).fetchone()
+    if row is None:
+        raise HTTPException(404, "No such file.")
+    return JSONResponse({"url": signDownload(row["storage_key"])}, headers={"Cache-Control": "no-store"})
+
+
+@app.exception_handler(StorageKeyError)
+async def storage_key_error(_: Request, error: StorageKeyError) -> Response:
+    return JSONResponse({"error": {"code": "bad_request", "message": str(error)}}, 400)
+
+
+@app.exception_handler(StorageNotFoundError)
+async def storage_not_found(_: Request, error: StorageNotFoundError) -> Response:
+    return JSONResponse({"error": {"code": "not_found", "message": str(error)}}, 404)
 
 
 @app.post("/api/notes", status_code=201)
