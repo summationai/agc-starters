@@ -21,3 +21,6 @@ file = "app/worker.py"
 find = "worker ready"
 replace = "worker reloaded"
 expect = "worker reloaded"
+
+[storage]
+test = "uv run --frozen pytest -q tests/test_storage.py"

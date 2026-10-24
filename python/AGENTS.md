@@ -24,6 +24,7 @@ app/log.py         JSON logs, and event() for workflow steps
 app/__main__.py    starts uvicorn on 0.0.0.0:$PORT (python -m app)
 dev.sh             agc up's dev command: uvicorn --reload behind Vite
 app/welcome.py     GET /api/welcome: the welcome page's facts; remove it with the welcome page
+app/storage.py     sign_upload, sign_download and delete, for files people upload once agentcloud.toml declares [storage]
 web/src/           the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
 migrations/        schema changes, as plain SQL (agc migration new <slug>)
 seed.sql           a demo person and three notes for a mirror that starts empty (agc up); never runs in production
@@ -36,6 +37,7 @@ seed.sql           a demo person and three notes for a mirror that starts empty 
 - **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, and add a handler to `HANDLERS` in `app/worker.py`. The worker polls every 10 s while busy and backs off to 10 minutes when idle, holding no connection in between, so the database can sleep: don't make a person wait on a job. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
 - **A workflow step:** `log.event("order.paid", f"order:{order_id}", related=[f"user:{user_id}"])`. Ids only, never emails or names.
 - **Logging:** `log.info("what happened", note=note_id)`. Never log emails, names, tokens or request bodies.
+- **Files people upload:** declare `[storage]` in `agentcloud.toml` (then `agc up` again), and use `app/storage.py`, never a `bytea` column. In a plain `def` route behind `signed_in(request)`, `storage.sign_upload(name)` returns `{"url", "fields", "key"}`: the browser posts `fields` and the file straight to `url`, and you save `key` in your table (a fresh key every time, so a file is never overwritten). To show a file, `storage.sign_download(key, lambda: row.user_id == user.id)`: your own check runs first, and the answer has a 5-minute `url`, or a `status` with an `error` (on a mirror, a file its masked rows name but it doesn't hold says "This file isn't on this mirror"). `storage.delete(key)` removes one.
 - **Data work:** for analytics in the app, `uv add duckdb` (or polars) and query in-process. Cache under `/tmp`, the only place the app may write.
 
 ## Validate every request body

@@ -8,6 +8,7 @@ A React UI (Vite) and one Node 24 server (Hono) that serves the UI and the API o
 npm ci               install dependencies (once, and after package-lock.json changes)
 agc up --detach      the app on your mirror: UI and API on one port, reloading on save
 npm run typecheck    tsc over the server and the UI
+npm test             the server's own tests (server/*.test.ts); agent.cloud's checks run separately: agc check
 npm run build        the UI into web/dist (agent.cloud runs this when it builds the image)
 ```
 
@@ -21,6 +22,7 @@ server/db.ts        the pool, and tx() for writes that belong together
 server/log.ts       JSON logs, and event() for workflow steps
 server/main.ts      production: the API plus web/dist          server/dev.ts  development: the API plus Vite
 server/welcome.ts   GET /api/welcome: the welcome page's facts; remove it with the welcome page
+server/storage.ts   signUpload, signDownload and delete, for files people upload once agentcloud.toml declares [storage]
 web/src/            the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
 migrations/         schema changes, as plain SQL (agc migration new <slug>)
 seed.sql            a demo person and three notes for a mirror that starts empty (agc up); never runs in production
@@ -33,6 +35,7 @@ seed.sql            a demo person and three notes for a mirror that starts empty
 - **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, and add a handler in `server/worker.ts`. The worker polls every 10 s while busy and backs off to 10 minutes when idle, so the database can sleep: don't make a person wait on a job. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
 - **A workflow step:** `event('order.paid', 'order:<id>', { related: ['user:<id>'] })`. Ids only, never emails or names.
 - **Logging:** `log.info('what happened', { ids })`. Never log emails, names, tokens or request bodies.
+- **Files people upload:** declare `[storage]` in `agentcloud.toml` (then `agc up` again), and use `server/storage.ts`, never a `bytea` column. In a route behind `signedIn(c)`, `await signUpload(name)` returns `{ url, fields, key }`: the browser posts `fields` and the file straight to `url`, and you save `key` in your table (a fresh key every time, so a file is never overwritten). To show a file, `await signDownload(key, () => row.user_id === user.id)`: your own check runs first, and the answer is a 5-minute `url`, or a `status` with an `error` (on a mirror, a file its masked rows name but it doesn't hold says "This file isn't on this mirror"). `storage.delete(key)` removes one (`import * as storage from './storage.ts'`).
 
 ## Validate every request body
 

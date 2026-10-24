@@ -21,3 +21,6 @@ file = "server/worker.ts"
 find = "worker ready"
 replace = "worker reloaded"
 expect = "worker reloaded"
+
+[storage]
+test = "node --test server/storage.test.ts"

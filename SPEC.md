@@ -84,6 +84,20 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **JOB-3:** Every job is safe to run twice. `CONF:mail-once`
 - **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. The trade-off is deliberate: the first email after a quiet spell can take up to ten minutes. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
 
+### Storage (`docs/specs/app-storage.md`: STO-3, STO-6, STO-12; `agc help storage`)
+Files people upload go to the app's bucket through signed URLs, never through the server or into Postgres. Each starter carries the helper an app calls once its `agentcloud.toml` declares `[storage]`; the starter itself declares none. Every rule here is proven by the stack's own tests against a fake S3 endpoint with fake keys, which `conformance.toml` names (`[storage] test`, §12) and `CONF:storage` runs.
+
+- **STOR-1:** The helper is `server/storage.ts` (TypeScript) or `app/storage.py` (Python), with `signUpload(key)`, `signDownload(key, mayRead)` and `delete(key)` (`sign_upload`, `sign_download` and `delete` in Python). Nothing in the starter imports it, and it reads `AGC_STORAGE_*` only when called, so an app without `[storage]` starts and runs as before (STO-0). Called without `AGC_STORAGE_BUCKET`, it throws an error that says to declare `[storage]`. Keys are relative to `AGC_STORAGE_PREFIX`, so a row names the same file in every environment; a key with a leading slash, an empty, `.` or `..` part, or a control character is refused. `CONF:storage`
+- **STOR-2:** `signUpload(key)` signs a POST policy for exactly one new key, `<uuid>/<key>` under `AGC_STORAGE_PREFIX`, with `content-length-range` from 0 to `AGC_STORAGE_MAX_OBJECT_MB` MB, valid for 10 minutes, and returns `{url, fields, key}`: the browser posts the fields and the file to `url`, and the app records `key`. The uuid is fresh every time, so a key is never reused and no upload overwrites a file a row already names (STO-12). Signing asks the bucket nothing. `CONF:storage`
+- **STOR-3:** `signDownload(key, mayRead)` runs the app's own access check first. Refused, it answers 403 and asks the bucket nothing. Otherwise it asks the key under the prefix with one HEAD, and signs a GET for 5 minutes on the place that holds it. A key the prefix doesn't hold:
+  - on a mirror (`AGENTCLOUD_MIRROR`), answers 404 `not_on_mirror`, "This file isn't on this mirror" (STO-6), and never reads production's bucket;
+  - in a rehearsal or a preview (`AGC_STORAGE_FALLBACK_BUCKET` set), signs a GET on the same key in production's bucket, with no second request and never a list (STO-12);
+  - otherwise answers 404 `not_found`.
+
+  Refusals come in the app's error shape, `{"error": {"code", "message"}}`, with their status. `CONF:storage`
+- **STOR-4:** `delete(key)` removes one key under the prefix, never anything in the fallback bucket. `CONF:storage`
+- **STOR-5:** The S3 client uses path-style URLs on `AGC_STORAGE_ENDPOINT`, and goes through `HTTPS_PROXY` (honouring `NO_PROXY`) when it's set. On a mirror that's agc's egress proxy, the only way out, which lets through the endpoint's own host and not `<bucket>.<host>` (agent.cloud's `docs/specs/mirror-egress.md`, MEG-2). The AWS JS SDK ignores `HTTPS_PROXY` by default, so the TypeScript helper gives its HTTPS agent the proxy (Node's `proxyEnv`); botocore reads it itself. Keys come from `AGC_STORAGE_ACCESS_KEY_ID` and `AGC_STORAGE_SECRET_ACCESS_KEY` when they're set, and otherwise from the SDK's container credentials (an AWS target). Checksums are sent only where S3 requires one, since GCS's S3 API refuses the SDKs' default ones. `CONF:storage` (with `HTTPS_PROXY` set, the request is a `CONNECT` for the endpoint's host)
+
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
 - **OBS-1:** Logs go to stdout and stderr as one JSON object per line, with `level` (`debug`, `info`, `warn`, `error`) and `msg`. The platform classifies by `level`; plain text falls back to keyword guessing. `CONF:logs-json` (at least 95% of lines parse, and every line from app code parses)
@@ -239,6 +253,9 @@ file = "server/worker.ts"
 find = "worker ready"
 replace = "worker reloaded"
 expect = "worker reloaded"
+
+[storage]        # the stack's own storage tests (STOR-1 to STOR-5), run in the starter's folder once its dependencies are installed
+test = "node --test server/storage.test.ts"
 ```
 
 - **DSC-1:** `conformance.toml` has `[dev] setup` and all three reload probes, and each `find` occurs exactly once in its `file`, so every probe edits one exact spot. `LINT:descriptor`
