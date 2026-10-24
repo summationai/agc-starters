@@ -67,6 +67,8 @@ NAMES = [
     "AGC_STORAGE_ACCESS_KEY_ID",
     "AGC_STORAGE_SECRET_ACCESS_KEY",
     "AGC_STORAGE_FALLBACK_BUCKET",
+    "AGC_STORAGE_FALLBACK_PREFIX",
+    "AGC_STORAGE_GATEWAY_URL",
     "AGENTCLOUD_MIRROR",
     "HTTPS_PROXY",
     "https_proxy",
@@ -137,7 +139,7 @@ def test_sto2_sign_upload_never_reuses_a_key(env) -> None:
     assert len({storage.sign_upload("photo.jpg")["key"] for _ in range(20)}) == 20
 
 
-@pytest.mark.parametrize("bad", ["", "/etc/hosts", "../other-mirror/x", "a/../../b", "a//b", "a/", "line\nbreak"])
+@pytest.mark.parametrize("bad", ["", "/etc/hosts", "../other-mirror/x", "a/../../b", "a//b", "a/", "line\nbreak", "${filename}"])
 def test_sto2_a_key_that_would_leave_the_prefix_is_refused(env, bad: str) -> None:
     with pytest.raises(ValueError, match="storage key"):
         storage.sign_upload(bad)
@@ -187,6 +189,65 @@ def test_sto3_a_rehearsal_reads_a_missing_key_from_production_with_one_head_and_
     assert parse_qs(urlsplit(r.url).query)["X-Amz-Expires"] == ["300"]
     assert [(m, p) for m, p, _ in seen] == [("HEAD", f"/{REH}/op_1/task_2/k9/receipt.png")]
     assert not any("list-type" in q or m == "GET" for m, _, q in seen), "never a list"
+
+
+def test_stor3_customer_fallback_prefix_uses_one_head(env) -> None:
+    env(AGC_STORAGE_FALLBACK_BUCKET="customer-bucket", AGC_STORAGE_FALLBACK_PREFIX="apps/one/prod/")
+    r = storage.sign_download("k1/receipt.pdf", lambda: True)
+    assert r.url and unquote(urlsplit(r.url).path) == "/customer-bucket/apps/one/prod/k1/receipt.pdf"
+    assert [method for method, _, _ in seen] == ["HEAD"]
+
+
+def test_stor6_gateway_preserves_signed_path_query_and_post_fields(env) -> None:
+    gateway = "https://files.example.test/app/place/attempt"
+    env(AGC_STORAGE_GATEWAY_URL=gateway + "/")
+    up = storage.sign_upload("person/literal %2F+ café?#.txt")
+    assert up["url"] == gateway + f"/{DEV}"
+    assert up["fields"]["key"] == "mirror-one/" + up["key"]
+    held.add(f"/{DEV}/mirror-one/person/literal %2F+ café?#.txt")
+    down = storage.sign_download("person/literal %2F+ café?#.txt", lambda: True)
+    assert down.url and down.url.startswith(gateway + f"/{DEV}/")
+    assert "%252F%2B%20caf%C3%A9%3F%23.txt?" in down.url
+    assert [method for method, _, _ in seen] == ["HEAD"]
+
+
+def test_stor7_signer_reloads_and_rejects_short_container_credentials(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGC_STORAGE_ACCESS_KEY_ID")
+    monkeypatch.delenv("AGC_STORAGE_SECRET_ACCESS_KEY")
+    attempts = 0
+    short = False
+
+    class Credentials:
+        def get_frozen_credentials(self):
+            return type("Frozen", (), {"access_key": "temporary", "secret_key": SECRET, "token": "session"})()
+
+        def refresh_needed(self, threshold: int) -> bool:
+            assert threshold == 11 * 60
+            return short or attempts == 1
+
+    class Client:
+        def generate_presigned_post(self, **_: object) -> dict[str, object]:
+            return {"url": f"http://127.0.0.1:1/{DEV}", "fields": {"session": "session"}}
+
+    class Session:
+        def __init__(self, **_: object) -> None:
+            nonlocal attempts
+            attempts += 1
+
+        def get_credentials(self) -> Credentials:
+            return Credentials()
+
+        def client(self, *_: object, **__: object) -> Client:
+            return Client()
+
+    monkeypatch.setattr(storage, "RefreshableCredentials", Credentials)
+    monkeypatch.setattr(storage.boto3, "Session", Session)
+    up = storage.sign_upload("person/a.txt")
+    assert attempts == 2 and up["fields"] == {"session": "session"}
+    short = True
+    with pytest.raises(RuntimeError, match="fewer than 11 minutes"):
+        storage.sign_upload("person/b.txt")
+    assert attempts == 4
 
 
 def test_sto3_a_rehearsal_reads_a_key_its_own_prefix_holds_from_there(env) -> None:

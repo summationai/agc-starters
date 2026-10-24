@@ -32,7 +32,7 @@ const BASE = {
   AGC_STORAGE_ENDPOINT: '', AGC_STORAGE_REGION: 'auto', AGC_STORAGE_BUCKET: 'agc-staging-0123456789abcdef-d', AGC_STORAGE_PREFIX: 'mirror-one/',
   AGC_STORAGE_MAX_OBJECT_MB: '25', AGC_STORAGE_ACCESS_KEY_ID: 'fake-key-id', AGC_STORAGE_SECRET_ACCESS_KEY: SECRET,
 };
-const NAMES = [...Object.keys(BASE), 'AGC_STORAGE_FALLBACK_BUCKET', 'AGENTCLOUD_MIRROR', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy', 'HTTP_PROXY', 'http_proxy'];
+const NAMES = [...Object.keys(BASE), 'AGC_STORAGE_FALLBACK_BUCKET', 'AGC_STORAGE_FALLBACK_PREFIX', 'AGC_STORAGE_GATEWAY_URL', 'AGENTCLOUD_MIRROR', 'HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy', 'HTTP_PROXY', 'http_proxy'];
 function env(over: Record<string, string> = {}) {
   for (const n of NAMES) delete process.env[n];
   Object.assign(process.env, BASE, { AGC_STORAGE_ENDPOINT: endpoint }, over);
@@ -75,7 +75,7 @@ test('STOR-2: signUpload never reuses a key, even for the same name', async () =
 });
 
 test('STOR-2: a key that would leave the prefix is refused', async () => {
-  for (const bad of ['', '/etc/passwd', '../other-mirror/x', 'a/../../b', 'a//b', 'a/', 'line\nbreak']) {
+  for (const bad of ['', '/etc/passwd', '../other-mirror/x', 'a/../../b', 'a//b', 'a/', 'line\nbreak', '${filename}']) {
     await assert.rejects(signUpload(bad), /storage key/, JSON.stringify(bad));
     await assert.rejects(signDownload(bad, () => true), /storage key/, JSON.stringify(bad));
     await assert.rejects(storage.delete(bad), /storage key/, JSON.stringify(bad));
@@ -118,6 +118,28 @@ test('STOR-3: in a rehearsal, a key missing from its own prefix is read from pro
   assert.equal(new URL(r.url).searchParams.get('X-Amz-Expires'), '300');
   assert.deepEqual(seen.map((s) => `${s.method} ${s.path}`), ['HEAD /agc-staging-0123456789abcdef-r/op_1/task_2/k9/receipt.png']);
   assert.ok(!seen.some((s) => s.query.has('list-type') || s.method === 'GET'), 'never a list');
+});
+
+test('STOR-3: a customer rehearsal uses its production fallback prefix after one HEAD', async () => {
+  env({ AGC_STORAGE_FALLBACK_BUCKET: 'customer-bucket', AGC_STORAGE_FALLBACK_PREFIX: 'apps/one/prod/' });
+  const r = await signDownload('k1/receipt.pdf', () => true);
+  assert.ok(r.ok);
+  assert.equal(decodeURIComponent(new URL(r.url).pathname), '/customer-bucket/apps/one/prod/k1/receipt.pdf');
+  assert.deepEqual(seen.map((s) => s.method), ['HEAD']);
+});
+
+test('STOR-6: gateway URLs retain the signed path, query and POST fields', async () => {
+  const gateway = 'https://files.example.test/app/place/attempt';
+  env({ AGC_STORAGE_GATEWAY_URL: gateway + '/' });
+  const up = await signUpload('person/literal %2F+ café?#.txt');
+  assert.equal(up.url, gateway + '/agc-staging-0123456789abcdef-d');
+  assert.equal(up.fields.key, 'mirror-one/' + up.key);
+  held.add('/agc-staging-0123456789abcdef-d/mirror-one/person/literal %2F+ café?#.txt');
+  const down = await signDownload('person/literal %2F+ café?#.txt', () => true);
+  assert.ok(down.ok);
+  assert.ok(down.url.startsWith(gateway + '/agc-staging-0123456789abcdef-d/'));
+  assert.match(down.url, /%252F%2B%20caf%C3%A9%3F%23\.txt\?/);
+  assert.deepEqual(seen.map((s) => s.method), ['HEAD']);
 });
 
 test('STOR-3: in a rehearsal, a key its own prefix holds is read from there', async () => {
