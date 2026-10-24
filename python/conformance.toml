@@ -23,4 +23,4 @@ replace = "worker reloaded"
 expect = "worker reloaded"
 
 [storage]
-test = "uv run --frozen pytest -q tests/test_storage.py tests/test_uploads.py"
+test = "uv run --frozen pytest -q tests/test_storage.py"

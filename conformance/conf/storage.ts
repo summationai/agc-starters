@@ -1,4 +1,4 @@
-// STOR-1 to STOR-8: storage helpers and example routes. Signing and the S3 calls are the stack's own SDK's, so the stack's own tests
+// STOR-1 to STOR-7: the storage helper. Signing and the S3 calls are the stack's own SDK's, so the stack's own tests
 // prove them against a fake S3 endpoint with fake keys: the command `conformance.toml` names as `[storage] test`, run in
 // the starter's folder once its dependencies are installed (CI installs them before the suite runs).
 import { fail, pass, type TestResult } from '../lib/report.ts';

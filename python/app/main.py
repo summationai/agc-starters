@@ -13,14 +13,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, StringConstraints, field_validator
+from pydantic import BaseModel, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import log
 from .auth import router as auth_router
 from .auth import signed_in
 from .db import pool, tx
-from .storage import sign_download, sign_upload
 from .welcome import welcome as welcome_facts
 
 UI = Path("web/dist")
@@ -108,42 +107,6 @@ class NoteIn(BaseModel):
     """A new note's body. FastAPI checks it before add_note runs; one that doesn't fit answers 400 (bad_request below)."""
 
     title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
-
-
-class UploadIn(BaseModel):
-    name: Annotated[str, StringConstraints(min_length=1, max_length=200, pattern=r"^[^\x00-\x1f\x7f/\\]+$")]
-
-    @field_validator("name")
-    @classmethod
-    def no_s3_substitution(cls, name: str) -> str:
-        if "${" in name:
-            raise ValueError("A file name cannot contain S3 substitution syntax.")
-        return name
-
-
-# STOR-8: Postgres keeps ownership and a relative key. File bytes go straight from the browser to storage.
-@app.post("/api/uploads", status_code=201)
-def upload(request: Request, body: UploadIn) -> Response:
-    user = signed_in(request)
-    post = sign_upload(f"{user['id']}/{body.name}")
-    with pool.connection() as conn:
-        conn.execute("INSERT INTO uploads (user_id, storage_key) VALUES (%s, %s)", (user["id"], post["key"]))
-    return JSONResponse(post, 201, headers={"Cache-Control": "no-store"})
-
-
-@app.get("/api/uploads/download")
-def download(request: Request, key: str = "") -> Response:
-    user = signed_in(request)
-    with pool.connection() as conn:
-        row = conn.execute("SELECT storage_key FROM uploads WHERE storage_key = %s AND user_id = %s", (key, user["id"])).fetchone()
-    if row is None:
-        return JSONResponse(
-            {"error": {"code": "not_found", "message": "There’s no such file."}}, 404, headers={"Cache-Control": "no-store"}
-        )
-    result = sign_download(row["storage_key"], lambda: True)
-    if result.error:
-        return JSONResponse({"error": result.error}, result.status, headers={"Cache-Control": "no-store"})
-    return JSONResponse({"url": result.url}, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/notes", status_code=201)

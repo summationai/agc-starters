@@ -41,7 +41,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
   try {
     // APP-7, APP-9, APP-13: the stack's own welcome page and Notes, rendered from their facts; no image needed.
     set('CONF:welcome-copy', await welcomeCopy(stack));
-    // STOR-1 to STOR-5: the storage helper, by the stack's own tests against a fake S3 endpoint; no image needed.
+    // STOR-1 to STOR-7: the storage helper, by the stack's own tests against a fake S3 endpoint; no image needed.
     set('CONF:storage', await storageTests(stack));
 
     // BLD-1, BLD-2, BLD-4, BLD-5: the default image, from exactly what agc ship sends, with the fake platform not yet up.

@@ -7,7 +7,6 @@ import { z } from 'zod';
 import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
 import { event, log } from './log.ts';
-import { signDownload, signUpload } from './storage.ts';
 import { welcome } from './welcome.ts';
 
 export const app = new Hono<Env>();
@@ -75,27 +74,6 @@ const body = <T extends z.ZodType>(schema: T) => zValidator('json', schema, (res
 });
 
 const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
-
-// STOR-8: Postgres keeps ownership and a relative key. File bytes go straight from the browser to storage.
-const UploadIn = z.object({ name: z.string().min(1).max(200).regex(/^[^\u0000-\u001f\u007f/\\]+$/).refine((name) => !name.includes('${')) });
-app.post('/api/uploads', body(UploadIn), async (c) => {
-  const user = signedIn(c);
-  const post = await signUpload(`${user.id}/${c.req.valid('json').name}`);
-  await pool.query('INSERT INTO uploads (user_id, storage_key) VALUES ($1, $2)', [user.id, post.key]);
-  c.header('Cache-Control', 'no-store');
-  return c.json(post, 201);
-});
-app.get('/api/uploads/download', async (c) => {
-  const user = signedIn(c);
-  c.header('Cache-Control', 'no-store');
-  const key = c.req.query('key') ?? '';
-  const { rows } = await pool.query<{ storage_key: string }>(
-    'SELECT storage_key FROM uploads WHERE storage_key = $1 AND user_id = $2', [key, user.id]);
-  if (!rows[0]) return c.json({ error: { code: 'not_found', message: 'There’s no such file.' } }, 404);
-  const result = await signDownload(rows[0].storage_key, () => true);
-  if (!result.ok) return c.json({ error: result.error }, result.status);
-  return c.json({ url: result.url });
-});
 
 app.get('/api/notes', async (c) => {
   const user = signedIn(c);
