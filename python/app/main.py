@@ -135,9 +135,7 @@ def upload(request: Request, body: UploadIn) -> Response:
 def download(request: Request, key: str = "") -> Response:
     user = signed_in(request)
     with pool.connection() as conn:
-        row = conn.execute(
-            "SELECT storage_key FROM uploads WHERE storage_key = %s AND user_id = %s", (key, user["id"])
-        ).fetchone()
+        row = conn.execute("SELECT storage_key FROM uploads WHERE storage_key = %s AND user_id = %s", (key, user["id"])).fetchone()
     if row is None:
         return JSONResponse(
             {"error": {"code": "not_found", "message": "There’s no such file."}}, 404, headers={"Cache-Control": "no-store"}
