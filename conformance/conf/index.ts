@@ -10,6 +10,7 @@ import { run, sleep, until } from '../lib/sh.ts';
 import type { Stack } from '../lib/stack.ts';
 import { dev } from './dev.ts';
 import { cookieAttrs, type Jar, req, type Res, signIn, UUID } from './http.ts';
+import { storageTests } from './storage.ts';
 import { welcomeApi, welcomeCopy } from './welcome.ts';
 
 const NAME = /^[a-z][a-z0-9_.-]{0,63}$/;
@@ -23,7 +24,7 @@ export const CONF_TESTS = [
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
-  'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return',
+  'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -40,6 +41,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
   try {
     // APP-7, APP-9, APP-13: the stack's own welcome page and Notes, rendered from their facts; no image needed.
     set('CONF:welcome-copy', await welcomeCopy(stack));
+    // STOR-1 to STOR-5: the storage helper, by the stack's own tests against a fake S3 endpoint; no image needed.
+    set('CONF:storage', await storageTests(stack));
 
     // BLD-1, BLD-2, BLD-4, BLD-5: the default image, from exactly what agc ship sends, with the fake platform not yet up.
     opts.log('building the image with agent.cloud\u2019s default Dockerfile…');

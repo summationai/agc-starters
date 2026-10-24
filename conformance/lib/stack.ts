@@ -9,7 +9,7 @@ import { run } from './sh.ts';
 
 export type Language = 'node' | 'python';
 export interface Reload { file: string; find: string; replace: string; url?: string; expect: string }
-export interface Descriptor { setup?: string; reload: { api?: Reload; ui?: Reload; worker?: Reload } }
+export interface Descriptor { setup?: string; storageTest?: string; reload: { api?: Reload; ui?: Reload; worker?: Reload } }
 export interface Stack {
   dir: string;
   name: string;
@@ -59,9 +59,10 @@ export async function readStack(dir: string): Promise<Stack> {
   };
   const r = table(d.reload);
   const setup = table(d.dev).setup;
+  const storageTest = table(d.storage).test;
   return {
     dir, name: String(table(raw.app).name ?? ''), language, raw, app: appConfig({ path: manifestPath, app: table(raw.app) as { name?: string }, raw }),
-    descriptor: { ...(typeof setup === 'string' ? { setup } : {}), reload: { api: reload(r.api), ui: reload(r.ui), worker: reload(r.worker) } },
+    descriptor: { ...(typeof setup === 'string' ? { setup } : {}), ...(typeof storageTest === 'string' ? { storageTest } : {}), reload: { api: reload(r.api), ui: reload(r.ui), worker: reload(r.worker) } },
     files: await shippedFiles(dir),
   };
 }
