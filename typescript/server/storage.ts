@@ -156,8 +156,15 @@ async function exists(s3: S3Client, where: { Bucket: string; Key: string }): Pro
 }
 
 // STOR-4: removes one key under this place's prefix, never anything in production's bucket from a rehearsal or a preview.
+// A key that isn't there is already deleted: S3 answers 204, GCS's S3 API answers 404 NoSuchKey, and both succeed here.
+// Only NoSuchKey: a bare 404 isn't enough, since a missing bucket answers 404 NoSuchBucket, and that still throws.
 async function remove(key: string): Promise<void> {
   const { bucket, prefix } = place();
-  await client().send(new DeleteObjectCommand({ Bucket: bucket, Key: prefix + checked(key) }));
+  const where = { Bucket: bucket, Key: prefix + checked(key) };
+  try {
+    await client().send(new DeleteObjectCommand(where));
+  } catch (e) {
+    if ((e as { name?: string }).name !== 'NoSuchKey') throw e;
+  }
 }
 export { remove as delete };
