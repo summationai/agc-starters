@@ -21,7 +21,8 @@ from app import storage
 SECRET = "fake-secret-for-tests"  # noqa: S105
 seen: list[tuple[str, str, str]] = []  # (method, path, query)
 held: set[str] = set()  # "/<bucket>/<key>" the fake bucket holds
-# How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, or a 403 refusal.
+# How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, a missing bucket's 404
+# NoSuchBucket, or a 403 refusal.
 delete_missing = {"as": "S3"}
 
 
@@ -43,6 +44,8 @@ class FakeS3(BaseHTTPRequestHandler):
         held.discard(path)
         if missing and delete_missing["as"] == "GCS":
             return self._error(404, "NoSuchKey")
+        if delete_missing["as"] == "no-bucket":
+            return self._error(404, "NoSuchBucket")
         if delete_missing["as"] == "refuse":
             return self._error(403, "AccessDenied")
         self.send_response(204)
@@ -312,11 +315,15 @@ def test_sto4_delete_of_a_key_that_isnt_there_succeeds_on_every_target_s3_204_an
     assert held == set()
 
 
-def test_sto4_any_other_error_from_a_delete_still_raises(env) -> None:
-    delete_missing["as"] = "refuse"
+@pytest.mark.parametrize(("answer", "status", "code"), [("no-bucket", 404, "NoSuchBucket"), ("refuse", 403, "AccessDenied")])
+def test_sto4_only_nosuchkey_is_success_a_missing_buckets_404_nosuchbucket_and_any_other_error_still_raise(
+    env, answer: str, status: int, code: str
+) -> None:
+    delete_missing["as"] = answer
     with pytest.raises(ClientError) as raised:
         storage.delete("k1/scan.pdf")
-    assert raised.value.response["ResponseMetadata"]["HTTPStatusCode"] == 403
+    assert raised.value.response["ResponseMetadata"]["HTTPStatusCode"] == status
+    assert raised.value.response["Error"]["Code"] == code
 
 
 def test_sto1_without_storage_the_helper_says_what_to_declare(env, monkeypatch: pytest.MonkeyPatch) -> None:

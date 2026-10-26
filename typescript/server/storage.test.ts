@@ -11,8 +11,9 @@ import { NOT_ON_MIRROR, signDownload, signUpload } from './storage.ts';
 const SECRET = 'fake-secret-for-tests';
 const seen: { method: string; path: string; query: URLSearchParams }[] = [];
 const held = new Set<string>(); // "/<bucket>/<key>" the fake bucket holds
-// How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, or a 403 refusal.
-let deleteMissing: 'S3' | 'GCS' | 'refuse' = 'S3';
+// How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, a missing bucket's 404
+// NoSuchBucket, or a 403 refusal.
+let deleteMissing: 'S3' | 'GCS' | 'no-bucket' | 'refuse' = 'S3';
 const s3Error = (code: string) => `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${code}</Message></Error>`;
 let s3: Server;
 let endpoint = '';
@@ -25,6 +26,7 @@ before(async () => {
     if (req.method === 'HEAD') return res.writeHead(held.has(path) ? 200 : 404).end();
     if (req.method === 'DELETE') {
       if (!held.delete(path) && deleteMissing === 'GCS') return res.writeHead(404, { 'content-type': 'application/xml' }).end(s3Error('NoSuchKey'));
+      if (deleteMissing === 'no-bucket') return res.writeHead(404, { 'content-type': 'application/xml' }).end(s3Error('NoSuchBucket'));
       if (deleteMissing === 'refuse') return res.writeHead(403, { 'content-type': 'application/xml' }).end(s3Error('AccessDenied'));
       return res.writeHead(204).end();
     }
@@ -198,9 +200,12 @@ test('STOR-4: delete of a key that isn\u2019t there succeeds on every target: S3
   }
 });
 
-test('STOR-4: any other error from a delete still throws', async () => {
-  deleteMissing = 'refuse';
-  await assert.rejects(storage.delete('k1/scan.pdf'), (e: { $metadata?: { httpStatusCode?: number } }) => e.$metadata?.httpStatusCode === 403);
+test('STOR-4: only NoSuchKey is success: a missing bucket\u2019s 404 NoSuchBucket, and any other error, still throws', async () => {
+  for (const [answer, status, code] of [['no-bucket', 404, 'NoSuchBucket'], ['refuse', 403, 'AccessDenied']] as const) {
+    deleteMissing = answer;
+    await assert.rejects(storage.delete('k1/scan.pdf'), (e: { name?: string; $metadata?: { httpStatusCode?: number } }) =>
+      e.name === code && e.$metadata?.httpStatusCode === status);
+  }
 });
 
 test('STOR-1: without [storage] there\u2019s no bucket, and the helper says what to declare', async () => {
