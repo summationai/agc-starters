@@ -211,6 +211,11 @@ def _exists(s3: Any, bucket: str, key: str) -> bool:
 
 def delete(key: str) -> None:
     """STOR-4: removes one key under this place's prefix, never anything in production's bucket from a rehearsal or a
-    preview."""
+    preview. A key that isn't there is already deleted: S3 answers 204, GCS's S3 API answers 404 NoSuchKey, and both
+    succeed here."""
     place = _place()
-    _client().delete_object(Bucket=place.bucket, Key=place.prefix + _checked(key))
+    try:
+        _client().delete_object(Bucket=place.bucket, Key=place.prefix + _checked(key))
+    except ClientError as e:
+        if e.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+            raise
