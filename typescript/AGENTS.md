@@ -55,6 +55,7 @@ app.post('/api/notes', body(NoteIn), async (c) => {
 ## Rules this stack keeps
 
 - Health (`/api/health`) never touches the database. agent.cloud asks it every 2 seconds.
+- On a mirror the pool keeps idle connections 30 s; in production it closes them after 1 s, so the database can sleep (`server/db.ts`). From a laptop a mirror query costs about 0.25 s and a new connection about 1.7 s: fetch what a page needs in one query, not one per row.
 - Sign-in checks `state` before trading the code. Sessions last a day. Cookies are `__Host-` cookies outside a mirror: apps share the agent.cloud site, and the prefix stops a neighbour app from planting one. Any cookie you add keeps that rule (`Secure`, `Path=/`, no `Domain`).
 - On SIGTERM, web and the worker finish what's in flight and exit.
 - Nothing writes inside the app's folder. Use `/tmp`, or better, the database.

@@ -62,6 +62,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **DATA-5:** The connection pool holds at most 10 connections per process. `review`
 - **DATA-6:** Queries are parameterized; no SQL is built from request input by string concatenation. `review`
 - **DATA-7 (SHOULD):** Columns that hold a fixed set of values (a status, a kind) use a `CHECK (col IN (…))` list or an enum. Masking keeps those exactly (`policy.ts`), so mirrors show the real states. `LINT:fixed-values` (reported)
+- **DATA-8 (SHOULD):** On a mirror (`AGENTCLOUD_MIRROR` set), the pool keeps idle connections about 30 s; everywhere else it closes them after 1 s, so a quiet app's database can sleep (JOB-4). A mirror's app runs on a laptop and its database in the cloud, behind agc's proxy, where a new connection costs about 1.7 s and a query about 0.25 s: a request a few seconds after the last one reuses a connection. `review` (TypeScript: `server/db.test.ts` loads the pool with and without `AGENTCLOUD_MIRROR`)
 
 ## 6. Platform services
 
