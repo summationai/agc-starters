@@ -9,7 +9,7 @@ cd conformance && npm ci
 node run.ts ../typescript     # or ../python: lint, build, fake platform, dev-mode reloads
 ```
 
-CI runs the same thing for every stack on every PR, and a starter that doesn't pass fails it. Keep `web/` identical across stacks: CI diffs it. A change to the UI goes into every stack in the same PR.
+CI runs the same thing for every stack on every PR, and a starter that doesn't pass fails it. The suite's own tests (`cd conformance && npm test`) also run `npm audit` on the TypeScript starter's lockfile and fail on any high or critical finding, so CI does too; fix one with `npm audit fix --package-lock-only` in `typescript/`, which keeps the versions within `package.json`'s ranges. Keep `web/` identical across stacks: CI diffs it. A change to the UI goes into every stack in the same PR.
 
 ## Changing the spec
 
