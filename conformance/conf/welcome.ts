@@ -1,5 +1,6 @@
-// The welcome page and the Notes example (SPEC.md APP-7 to APP-13).
-//   CONF:welcome-copy   the stack's own UI modules, rendered with react-dom/server for every run and production state
+// The welcome page and the Notes example (SPEC.md APP-7 to APP-14).
+//   CONF:welcome-copy   the stack's own UI modules, rendered with react-dom/server for every run and production state,
+//                       each as an app set up by hand and as one started from Start
 //   CONF:welcome        GET /api/welcome on the built app: its fields, no secrets, the database probe and its bounds
 //   CONF:welcome-run    where the process says it runs, and what it says about production, from the environment alone
 //   CONF:signin-return  signing in from /notes comes back to /notes
@@ -29,7 +30,7 @@ const starter = (s: Stack) => (s.language === 'python' ? 'Python starter' : 'Typ
 // ---- CONF:welcome-copy ------------------------------------------------------------------------------------------------
 
 type Production = { url: string; version: number | null } | null;
-type Facts = Record<string, unknown> & { run: string; production: Production };
+type Facts = Record<string, unknown> & { run: string; started: 'live' | null; production: Production };
 type Ui = { Welcome: FunctionComponent<Record<string, unknown>>; NotesView: FunctionComponent<Record<string, unknown>> };
 
 // The stack's web/src, transpiled (types stripped, JSX to react/jsx-runtime) into a scratch folder that resolves react
@@ -74,6 +75,9 @@ const CHIP: Record<string, string> = {
 };
 const NOT_RELEASED = ['reserved, not released', 'Nothing was public when this copy started', 'nothing was released at'];
 const RELEASED = ['agc ship releases a new version there'];
+// APP-14: the words of an app set up by hand, and of one started from Start, whose agent is already building it.
+const BY_HAND = ['is ready to build', 'Tell your agent what to build, and this page becomes your app', 'Tell your agent what to build.'];
+const STARTED = ['is about to be built', "Your agent's first change replaces this page", 'Your agent is on it', 'Work page', "agent.cloud's console"];
 const CHECKED = '2026-10-21T04:00:00.000Z';
 const URL_ = 'https://folio.agent.cloud';
 const HOST = 'folio.agent.cloud';
@@ -89,7 +93,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       app: 'folio', stack: stackName(s), run: 'mirror',
       parts: { web: 'running', api: 'running', database: 'running', worker: 'configured', signin: 'configured', email: 'configured' },
       database: { migrations: 1, checked_at: CHECKED }, checks: { smoke: 1, invariants: 1 },
-      preview_expires_at: null, production: null, ...over,
+      preview_expires_at: null, production: null, started: null, ...over,
     });
     const now = Date.parse(CHECKED) + 40_000;
     const hereOf = (run: string) => (run === 'mirror' ? 'localhost:8080' : run === 'live' ? HOST : `${run}.example.test`);
@@ -97,6 +101,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
     const p7: string[] = [...routes];
     const p9: string[] = [];
     const p13: string[] = [];
+    const p14: string[] = [];
     const want = (list: string[], label: string, t: string, phrase: string | RegExp) => {
       if (!(typeof phrase === 'string' ? t.includes(phrase) : phrase.test(t))) list.push(`${label}: no "${phrase}"`);
     };
@@ -104,16 +109,20 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       if (typeof phrase === 'string' ? t.includes(phrase) : phrase.test(t)) list.push(`${label}: says "${typeof phrase === 'string' ? phrase : t.match(phrase)![0]}"`);
     };
 
-    // Every row of APP-9's table, and the mirror once per production state.
-    const cases: [string, Facts][] = [
-      ['mirror, production unknown', facts({ run: 'mirror', production: null })],
-      ['mirror, reserved', facts({ run: 'mirror', production: { url: URL_, version: null } })],
-      ['mirror, released v3', facts({ run: 'mirror', production: { url: URL_, version: 3 } })],
-      ['live', facts({ run: 'live' })],
-      ['rehearsal', facts({ run: 'rehearsal' })],
-      ['preview', facts({ run: 'preview', preview_expires_at: '2026-10-28T04:00:00.000Z' })],
-      ['unknown', facts({ run: 'unknown' })],
+    // Every row of APP-9's table, and the mirror once per production state; each set up by hand and started from Start.
+    const rows: [string, Partial<Facts>][] = [
+      ['mirror, production unknown', { run: 'mirror', production: null }],
+      ['mirror, reserved', { run: 'mirror', production: { url: URL_, version: null } }],
+      ['mirror, released v3', { run: 'mirror', production: { url: URL_, version: 3 } }],
+      ['live', { run: 'live' }],
+      ['rehearsal', { run: 'rehearsal' }],
+      ['preview', { run: 'preview', preview_expires_at: '2026-10-28T04:00:00.000Z' }],
+      ['unknown', { run: 'unknown' }],
     ];
+    const cases: [string, Facts][] = rows.flatMap(([label, over]) => [
+      [label, facts(over)] as [string, Facts],
+      [`${label}, started from Start`, facts({ ...over, started: 'live' })] as [string, Facts],
+    ]);
     for (const [label, f] of cases) {
       const html = page(f);
       const t = textOf(html);
@@ -162,9 +171,10 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       // Reduced motion: no element in an animating context, nothing animated inline.
       never(p13, `${label} (reduced motion)`, html, /class="[^"]*\bmoving\b/);
       never(p13, `${label} (reduced motion)`, html, /style="[^"]*\banimation(-name)?\s*:/);
-      // No console link; the footer names the stack and no version.
+      // No console link; the footer names the stack and no version. Only an app started from Start names the console,
+      // in words, as where its build shows (APP-14).
       never(p13, label, html, /href="[^"]*console/i);
-      never(p13, label, t, /\bconsole\b/i);
+      if (f.started === null) never(p13, label, t, /\bconsole\b/i);
       const footer = /<footer\b[\s\S]*?<\/footer>/.exec(html)?.[0];
       if (!footer) p13.push(`${label}: no <footer>`);
       else {
@@ -172,7 +182,10 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
         want(p13, `${label} footer`, ft, starter(s));
         never(p13, `${label} footer`, ft, /\bv?\d+\.\d+(\.\d+)?\b|\bv\d+\b/);
       }
-      want(p7, label, t, 'is ready to build');
+      // APP-14: the hand-set-up words, or the started-from-Start ones, never a mix.
+      for (const phrase of BY_HAND) (f.started === 'live' ? never : want)(p14, label, t, phrase);
+      for (const phrase of STARTED) (f.started === 'live' ? want : never)(p14, label, t, phrase);
+      want(p7, label, t, f.started === 'live' ? 'is about to be built' : 'is ready to build');
       never(p7, label, t, 'Your notes');
     }
 
@@ -227,12 +240,13 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
     const once = (t3.match(/each new note sends/gi) ?? []).length;
     if (once !== 1) p13.push(`Notes signed in: says "each new note sends" ${once} times (once)`);
 
-    const all = [...p7, ...p9, ...p13];
-    const summary = `${cases.length} welcome renders (every run, the mirror in each production state) and 3 Notes renders`;
+    const all = [...p7, ...p9, ...p13, ...p14];
+    const summary = `${cases.length} welcome renders (every run, the mirror in each production state, each set up by hand and started from Start) and 3 Notes renders`;
     return (all.length ? fail : pass)(all.length ? all.slice(0, 6).join('; ') : summary, {
       'APP-7': verdict(!p7.length, p7.length ? p7.join('; ') : '/ renders the welcome page and /notes renders Notes, each with its own text; main.tsx routes both; Notes signs in with return_to=/notes'),
       'APP-9': verdict(!p9.length, p9.length ? p9.join('; ') : 'each run shows exactly its own status words; "Live at" and a done "released" step only when live; the mirror\u2019s line follows production'),
       'APP-13': verdict(!p13.length, p13.length ? p13.join('; ') : 'not-released copy only on a reserved mirror, released copy only with a version; nothing animates under reduced motion; no console link; the footer names the stack and no version; Worker and Sign-in say what the facts say; no per-note email status'),
+      'APP-14': verdict(!p14.length, p14.length ? p14.join('; ') : 'started from Start: "about to be built", the agent\u2019s first change replaces the page, "Your agent is on it" and the Work page in agent.cloud\u2019s console, in every run; set up by hand: today\u2019s words and none of those'),
     });
   } catch (e) {
     return fail(`rendering the UI failed: ${(e as Error).message}`);
@@ -244,7 +258,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
 // ---- CONF:welcome, CONF:welcome-run, CONF:signin-return ---------------------------------------------------------------
 
 type Answer = { status: number; json: Record<string, unknown> | null; text: string; ms: number };
-const TOP = ['app', 'checks', 'database', 'parts', 'preview_expires_at', 'production', 'run', 'stack'];
+const TOP = ['app', 'checks', 'database', 'parts', 'preview_expires_at', 'production', 'run', 'stack', 'started'];
 const PARTS = ['api', 'database', 'email', 'signin', 'web', 'worker'];
 const STATES = new Set(['running', 'configured', 'not set up', 'not verified']);
 const keys = (o: unknown) => (o && typeof o === 'object' ? Object.keys(o).sort().join(',') : String(o));
@@ -265,6 +279,7 @@ function shapeProblems(j: Record<string, unknown> | null): string[] {
   if (keys(j.checks) !== 'invariants,smoke') p.push(`checks ${keys(j.checks)}`);
   if (j.production !== null && keys(j.production) !== 'url,version') p.push(`production ${keys(j.production)}`);
   if (j.preview_expires_at !== null && !ISO.test(String(j.preview_expires_at))) p.push(`preview_expires_at ${JSON.stringify(j.preview_expires_at)}`);
+  if (j.started !== null && j.started !== 'live') p.push(`started ${JSON.stringify(j.started)}`);
   return p;
 }
 
@@ -292,17 +307,26 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
   }, 250)) ?? 'timeout' as const;
   const probes = async () => (await env.statements()).filter((st) => st.text.includes(LEDGER)).length;
 
-  // APP-8: a manifest with its own name and a secret in the worker's command, mounted over the image's own.
+  // APP-8: a manifest with its own name and a secret in the worker's command and in `[app] started`, mounted over the
+  // image's own; and APP-14's, the starter's own with `started = "live"`, as agc init writes it for an app made through Start.
   const manifestDir = join(env.tmp, 'welcome');
   mkdirSync(manifestDir, { recursive: true });
-  const raw = parse(readFileSync(join(s.dir, 'agentcloud.toml'), 'utf8')) as Record<string, Record<string, unknown>>;
-  raw.app = { ...raw.app, name };
+  chmodSync(manifestDir, 0o755);
+  const own = () => parse(readFileSync(join(s.dir, 'agentcloud.toml'), 'utf8')) as Record<string, Record<string, unknown>>;
+  const writeManifest = (file: string, raw: Record<string, Record<string, unknown>>) => {
+    writeFileSync(join(manifestDir, file), stringify(raw));
+    chmodSync(join(manifestDir, file), 0o644);
+    return join(manifestDir, file);
+  };
+  const raw = own();
+  raw.app = { ...raw.app, name, started: SENTINEL };
   const service = (raw.service ?? {}) as Record<string, Record<string, unknown>>;
   service.worker = { ...service.worker, command: `${String(service.worker?.command ?? 'true')} --conformance-secret ${SENTINEL}` };
   raw.service = service;
-  writeFileSync(join(manifestDir, 'agentcloud.toml'), stringify(raw));
-  chmodSync(manifestDir, 0o755);
-  chmodSync(join(manifestDir, 'agentcloud.toml'), 0o644);
+  const secretManifest = writeManifest('agentcloud.toml', raw);
+  const startedRaw = own();
+  startedRaw.app = { ...startedRaw.app, started: 'live' };
+  const startedManifest = writeManifest('started.toml', startedRaw);
   const workdir = (await must('docker', ['image', 'inspect', '-f', '{{.Config.WorkingDir}}', env.image])).trim() || '/app';
 
   const without = (e: Record<string, string>, ...names: string[]) => { for (const n of names) delete e[n]; return e; };
@@ -325,19 +349,20 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
   log('welcome: starting the app once per run, production and secrets case…');
   const started: Container[] = [];
   const start = async (n: string, e: Record<string, string>, mounts: string[] = []) => { const c = await env.web(n, e, { alias: false, mounts }); started.push(c); return c; };
-  const secret = await start('wsecret', env.appEnv({ CONFORMANCE_WELCOME_SECRET: SENTINEL, AGC_AUTH_URL: `${PLATFORM}/auth/test/${SENTINEL}` }), [`${join(manifestDir, 'agentcloud.toml')}:${workdir}/agentcloud.toml:ro`]);
+  const secret = await start('wsecret', env.appEnv({ CONFORMANCE_WELCOME_SECRET: SENTINEL, AGC_AUTH_URL: `${PLATFORM}/auth/test/${SENTINEL}` }), [`${secretManifest}:${workdir}/agentcloud.toml:ro`]);
   const burst = await start('wburst', env.appEnv());
   const paused = await start('wpaused', env.appEnv());
+  const fromStart = await start('wstarted', env.appEnv(), [`${startedManifest}:${workdir}/agentcloud.toml:ro`]);
   const runs = await Promise.all(cases.map((c, i) => start(`wrun${i}`, c.env)));
   const signins = await Promise.all(signinCases.map((c, i) => start(`wsignin${i}`, c.env)));
-  const states = await Promise.all([secret, burst, paused, ...runs, ...signins].map(up));
-  const [sUp, bUp, pUp] = states;
-  const runUp = states.slice(3, 3 + runs.length);
-  const signinUp = states.slice(3 + runs.length);
+  const states = await Promise.all([secret, burst, paused, fromStart, ...runs, ...signins].map(up));
+  const [sUp, bUp, pUp, fUp] = states;
+  const runUp = states.slice(4, 4 + runs.length);
+  const signinUp = states.slice(4 + runs.length);
   let dbPaused = false;
   try {
-    if (sUp !== 'ready' || bUp !== 'ready' || pUp !== 'ready') {
-      const logs = (await env.logs(sUp !== 'ready' ? secret : bUp !== 'ready' ? burst : paused)).slice(-5).join(' | ');
+    if (sUp !== 'ready' || bUp !== 'ready' || pUp !== 'ready' || fUp !== 'ready') {
+      const logs = (await env.logs(sUp !== 'ready' ? secret : bUp !== 'ready' ? burst : pUp !== 'ready' ? paused : fromStart)).slice(-5).join(' | ');
       const r = fail(`the app didn\u2019t become ready for the welcome checks: ${logs}`);
       for (const t of ['CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return']) out.set(t, r);
       return out;
@@ -345,6 +370,7 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     const [{ n: ledger }] = await env.sql<{ n: number }>(`SELECT count(*)::int AS n FROM ${LEDGER}`);
     const p8: string[] = [];
     const p10: string[] = [];
+    const p14: string[] = [];
 
     // APP-10: 50 callers at once on a fresh process share one probe on at most one connection; more calls within 60 s
     // run no new query.
@@ -394,6 +420,18 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     if (parts.web !== 'running' || parts.api !== 'running') p10.push(`web ${parts.web}, api ${parts.api}`);
     if (parts.database !== 'running' || db.migrations !== ledger) p10.push(`database ${parts.database} with ${String(db.migrations)} migrations; the ledger has ${ledger}`);
     if (parts.worker !== 'configured') p10.push(`worker ${parts.worker} with [service.worker] in the manifest`);
+    // APP-8, APP-14: `started` is "live" only for exactly that; the sentinel in `[app] started` is null and never echoed
+    // (the leak check above), and the starter's own manifest, which has none, is null.
+    const startedProblems: string[] = [];
+    if (sec.json?.started !== null) startedProblems.push(`started ${JSON.stringify(sec.json?.started)} with a sentinel in [app] started (null)`);
+    const own0 = answers[0]?.json?.started;
+    if (own0 !== null || answers.some((a) => a.json?.started !== own0)) startedProblems.push(`started ${JSON.stringify(own0)} with the starter\u2019s own manifest (null)`);
+    const fromStartAnswer = await call(fromStart);
+    if (fromStartAnswer.json?.started !== 'live') startedProblems.push(`started ${JSON.stringify(fromStartAnswer.json?.started)} with started = "live" (live)`);
+    const fromStartShape = shapeProblems(fromStartAnswer.json);
+    if (fromStartShape.length) startedProblems.push(`started = "live": ${fromStartShape.join(', ')}`);
+    p8.push(...startedProblems);
+    p14.push(...startedProblems);
     const { smoke, invariant } = readChecks(s.raw);
     const checks = (sec.json?.checks ?? {}) as Record<string, unknown>;
     if (checks.smoke !== smoke.length || checks.invariants !== invariant.length) p10.push(`checks ${JSON.stringify(checks)}; the manifest has ${smoke.length} smoke and ${invariant.length} invariants`);
@@ -493,7 +531,8 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     if (!(recovered.status === 200 && recovered.ms <= 3000 && rparts.database === 'running')) p10.push(`after the frozen probe expired, database back: ${recovered.status} in ${recovered.ms} ms, ${rparts.database ?? 'no state'}`);
 
     out.set('CONF:welcome', (p8.length || p10.length ? fail : pass)([...p8, ...p10].slice(0, 4).join('; ') || 'the answer, its secrets and its database probe', {
-      'APP-8': verdict(!p8.length, p8.length ? p8.join('; ') : `exactly APP-8\u2019s fields in every case; app is the mounted manifest\u2019s ${name}; a sentinel in an env var, AGC_AUTH_URL and the worker\u2019s command, and the app\u2019s tokens and database password, appear in no answer`),
+      'APP-14': verdict(!p14.length, p14.length ? p14.join('; ') : 'started is "live" with started = "live" in the manifest, null with the starter\u2019s own manifest and with a sentinel in [app] started'),
+      'APP-8': verdict(!p8.length, p8.length ? p8.join('; ') : `exactly APP-8\u2019s fields in every case; app is the mounted manifest\u2019s ${name}; a sentinel in an env var, AGC_AUTH_URL, the worker\u2019s command and [app] started, and the app\u2019s tokens and database password, appear in no answer`),
       'APP-10': verdict(!p10.length, p10.length ? p10.join('; ') : `database running with ${ledger} migrations (the ledger\u2019s count); frozen: not verified (timeout) in ${frozen.ms} ms, health ${health.status}; ${burstEvidence}; after 60 s frozen: not verified, checked later; frozen probe expired, database back: running in ${recovered.ms} ms; email with one half: not set up; ${signinSeen.join('; ')}`),
     }));
     out.set('CONF:welcome-run', (p9.length ? fail : pass)(p9.length ? p9.join('; ') : `${seen.sort().join('; ')}; production as expected in each`));

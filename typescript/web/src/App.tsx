@@ -37,6 +37,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
   const prod = run === 'mirror' ? facts?.production ?? null : null;
   const unreleased = prod !== null && prod.version === null; // agent.cloud said: never released, as this copy started
   const where = run === 'live' ? here : prod ? host(prod.url) : null; // the app's address, only when it's known
+  const building = facts?.started === 'live'; // APP-14: made through Start, so its agent is already building it
   const [copied, setCopied] = useState(false);
   const copy = () => void navigator.clipboard?.writeText(PROMPT).then(() => setCopied(true));
   return (
@@ -51,10 +52,10 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
             {['teal', 'pink', 'orange', 'blue'].map((c, i) => <span className="slot" key={c}><span className="bar" style={{ background: `var(--${c})`, animationDelay: `${i * 0.08}s, ${1.3 + i * 0.2}s` }} /></span>)}
           </div>
           {facts && <div className="chips up d1">{chips(facts, here, prod)}</div>}
-          <h1 id="hero-h" className="title up d2">{app} is ready to build.</h1>
+          <h1 id="hero-h" className="title up d2">{app} {building ? 'is about to be built.' : 'is ready to build.'}</h1>
           <p className="lede up d3">
             This is the agent.cloud starter: a web app, an API, a Postgres database and a background worker, wired together{run === 'mirror' ? ' and running on your machine' : ''}.
-            {unreleased ? ' Nothing was public when this copy started.' : ''} Tell your agent what to build, and this page becomes your app.
+            {unreleased ? ' Nothing was public when this copy started.' : ''} {building ? 'Your agent’s first change replaces this page.' : 'Tell your agent what to build, and this page becomes your app.'}
           </p>
           <ol className="steps up d4" aria-label={`Where ${app} is`}>
             <li className="done"><Check size={17} />Started</li>
@@ -71,8 +72,10 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
 
         <section className="card next up d5" aria-labelledby="next-h">
           <p className="eyebrow">Next</p>
-          <h2 id="next-h">Tell your agent what to build.</h2>
-          <p className="say">Say what the app is for, in a sentence or two. Your agent edits this starter, runs its checks, and ships it here.</p>
+          <h2 id="next-h">{building ? 'Your agent is on it.' : 'Tell your agent what to build.'}</h2>
+          <p className="say">{building
+            ? 'It’s building what you asked for. Follow the build on this app’s Work page in agent.cloud’s console.'
+            : 'Say what the app is for, in a sentence or two. Your agent edits this starter, runs its checks, and ships it here.'}</p>
           <div className="prompt">
             <p>“Turn this into <span className="ph1">[WHAT YOUR APP DOES]</span>. People should be able to <span className="ph2">[THE FIRST THING THEY DO]</span>.”<span className="caret" aria-hidden="true" /></p>
             <button type="button" className="btn btn-cream" onClick={copy}>{copied ? <Check size={16} /> : <Stripes size={22} light />}{copied ? 'Copied' : 'Copy prompt'}</button>
