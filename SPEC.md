@@ -161,21 +161,21 @@ These rules bind the starters in this repo, not the apps grown from them: once a
   `LINT:checks`, `CONF:smoke`
 - **APP-6:** A `seed.sql`, declared as `[data.db] seed = "seed.sql"`, inserts one demo person (a fixed uuid, `demo@example.test`, "Demo Person") and three notes for them, every insert `ON CONFLICT DO NOTHING`, touching only tables the migrations create and no DDL, in under 200 lines. agc runs it once on a mirror that starts empty, after the migrations (agent.cloud's `docs/specs/seed-data.md`); it never runs in production. `LINT:seed`, `CONF:seed` (after the migrations, the seed applies on the fake database; signed in as the demo person's id, `GET /api/notes` answers exactly those three notes; applying it a second time changes nothing)
 
-### The welcome page (APP-7 to APP-13)
+### The welcome page (APP-7 to APP-14)
 
 The welcome page is frame 0 of every app: what a person sees the first time `agc up` opens it, before their agent has built anything. It must never claim more than is true. In particular, it never says the app is live before its first release.
 
 - **APP-7:** `/` serves the welcome page, and `/notes` serves the Notes example: sign-in, the person's notes and the add form, as before. Both are routes of the one UI bundle, so a reload of either answers `index.html` (PROC-2). APP-2 to APP-6 stand unchanged. The Notes page says it's an example the agent removes once the app takes shape, and signing in from it returns to `/notes` (`/auth/sign-in?return_to=/notes`, AUTH-1). `CONF:welcome-copy` (the stack's own UI modules rendered with `react-dom/server`: `/` renders the welcome page and `/notes` renders Notes, each with its own text, so a missing route fails even though the SPA fallback answers HTML), `CONF:signin-return` (signing in through `/auth/sign-in?return_to=/notes` on the fake platform ends at `/notes`)
 - **APP-8:** `GET /api/welcome` answers 200 with what the page shows, no sign-in, never a secret or a variable's value:
   ```json
-  {"app": "folio", "stack": "typescript", "run": "mirror",
+  {"app": "folio", "stack": "typescript", "run": "mirror", "started": "live",
    "parts": {"web": "running", "api": "running", "database": "running", "worker": "configured",
              "signin": "configured", "email": "configured"},
    "database": {"migrations": 1, "checked_at": "2026-10-21T04:00:00Z"},
    "checks": {"smoke": 1, "invariants": 1}, "preview_expires_at": null,
    "production": {"url": "https://folio.agent.cloud", "version": null}}
   ```
-  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `stack` is the starter's own name. The answer has exactly the fields above. `run` and the part states are derived from the manifest and the environment (APP-9, APP-10); `preview_expires_at` is `AGC_PREVIEW_EXPIRES_AT` when it parses as a timestamp, re-written as ISO 8601 UTC, and `null` otherwise. `production` is what agc tells a mirror about the app (agent.cloud's mirror-release-state spec, MREL): on a mirror, when `AGENTCLOUD_APP_URL` is an `https://` origin and `AGENTCLOUD_RELEASED` is set, `{"url": <that origin>, "version": <the number, or null when it's empty>}`; otherwise `null`, meaning unknown. The app's public address is public, so it may be returned. No raw command, path, other URL, token or other value from the manifest or the environment is returned. The page's stack lines are fixed labels in the UI (APP-11). `CONF:welcome` (the answer has exactly these fields; its `app` is the manifest's name; with a sentinel secret in an environment variable, in `AGC_AUTH_URL` and in `[service.worker] command`, the answer contains none of them)
+  `app` is `[app] name` from `agentcloud.toml`, read when the server starts, never a literal. `started` is `"live"` when that manifest's `[app] started` is exactly `"live"` (agc init writes it for an app made through agent.cloud's Start page, whose builder is already at work on it), and `null` otherwise: absent, or any other value, which is never echoed. `stack` is the starter's own name. The answer has exactly the fields above. `run` and the part states are derived from the manifest and the environment (APP-9, APP-10); `preview_expires_at` is `AGC_PREVIEW_EXPIRES_AT` when it parses as a timestamp, re-written as ISO 8601 UTC, and `null` otherwise. `production` is what agc tells a mirror about the app (agent.cloud's mirror-release-state spec, MREL): on a mirror, when `AGENTCLOUD_APP_URL` is an `https://` origin and `AGENTCLOUD_RELEASED` is set, `{"url": <that origin>, "version": <the number, or null when it's empty>}`; otherwise `null`, meaning unknown. The app's public address is public, so it may be returned. No raw command, path, other URL, token or other value from the manifest or the environment is returned. The page's stack lines are fixed labels in the UI (APP-11). `CONF:welcome` (the answer has exactly these fields; its `app` is the manifest's name; with a sentinel secret in an environment variable, in `AGC_AUTH_URL`, in `[service.worker] command` and in `[app] started`, the answer contains none of them and its `started` is `null`; with `started = "live"` it is `"live"`, and with the starter's own manifest, which has no `started`, `null`)
 - **APP-9:** `run` says where this process runs, from what the platform sets and an app can't fake:
 
   | `run` | When | The page says |
@@ -210,7 +210,7 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   - the agent.cloud mark;
   - the status chips (APP-9);
   - the progress line;
-  - the "Tell your agent what to build" card, with its Copy prompt button and highlighted placeholders;
+  - the "Tell your agent what to build" card, with its Copy prompt button and highlighted placeholders (APP-14 changes its words for an app started from Start);
   - the `agc up`, `agc check` and `agc ship` cards;
   - "What's running" as Browser → Web → API → Database ← Worker, with Sign-in and Checks below;
   - the Notes example card;
@@ -229,6 +229,13 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   Both themes follow `prefers-color-scheme`. Fonts are rc's call for the starter, an exception to agent.cloud's Geist rule for its own pages: Bricolage Grotesque for text and JetBrains Mono for code, on both pages, loaded from Google Fonts as the design does, with system fallbacks so the page reads the same offline. They're set in one CSS variable each, so changing them is a one-line edit.
 
   Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
+
+- **APP-14:** An app started from agent.cloud's Start page already has its builder at work, and its Live screen shows this page as frame 0, so when `/api/welcome` says `started` is `"live"` (APP-8) the page says the app is about to be built, not that it waits to be told:
+  - the headline is "<app> is about to be built." instead of "<app> is ready to build.";
+  - the lede ends "Your agent's first change replaces this page." instead of "Tell your agent what to build, and this page becomes your app.";
+  - the Next card's heading is "Your agent is on it." instead of "Tell your agent what to build.", and its body says the build shows on the app's Work page in agent.cloud's console. It names no console address and links to none (APP-12): the page doesn't know it.
+
+  Everything else is the same in both variants: the chips, the progress line, the parts, the loop cards, production's lines, the design and the motion. With `started` `null` the page's words are exactly APP-13's. `CONF:welcome` (`started` is `"live"` with `started = "live"` in the manifest, and `null` without it), `CONF:welcome-copy` (each run and production state rendered with `started` `"live"` says "is about to be built", "Your agent's first change replaces this page", "Your agent is on it" and the Work page, and never "is ready to build" or "Tell your agent what to build"; rendered with `started` `null`, the reverse; neither links to a console)
 
 ## 12. The conformance descriptor
 
