@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
+from typing import Any
 
 import httpx
 import pytest
@@ -97,13 +98,29 @@ def test_app_8_welcome_has_exactly_the_fields_and_no_secret(fresh: pytest.Monkey
     r = client.get("/api/welcome")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"app", "stack", "run", "parts", "database", "checks", "preview_expires_at", "production"}
+    assert set(body) == {"app", "stack", "run", "started", "parts", "database", "checks", "preview_expires_at", "production"}
     assert set(body["parts"]) == {"web", "api", "database", "worker", "signin", "email"}
     with open("agentcloud.toml", "rb") as f:
         assert body["app"] == tomllib.load(f)["app"]["name"]
     assert body["stack"] == "python" and body["checks"] == {"smoke": 1, "invariants": 1}
     assert body["parts"]["worker"] == "configured"
     assert sentinel not in r.text
+
+
+@pytest.mark.parametrize(
+    ("app", "started"),
+    [
+        ({"name": "folio", "started": "live"}, "live"),
+        ({"name": "folio"}, None),
+        ({"name": "folio", "started": "sentinel-started-x9q"}, None),  # any other value is null, never echoed
+        ({"name": "folio", "started": True}, None),
+    ],
+)
+def test_app_8_app_14_started_is_live_or_null(fresh: pytest.MonkeyPatch, app: dict[str, Any], started: str | None) -> None:
+    fresh.setattr(welcome, "_manifest", {"app": app})
+    r = client.get("/api/welcome")
+    assert r.json()["started"] == started
+    assert "sentinel-started" not in r.text
 
 
 def test_app_8_app_is_the_manifests_name_not_a_literal(fresh: pytest.MonkeyPatch) -> None:
