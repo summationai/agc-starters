@@ -8,6 +8,7 @@ export interface Welcome {
   app: string;
   stack: 'typescript' | 'python';
   run: Run;
+  started: 'live' | null; // "live": made through agent.cloud's Start page, its builder already at work (APP-14)
   parts: { web: PartState; api: PartState; database: PartState; worker: PartState; signin: PartState; email: PartState };
   database: { migrations: number | null; checked_at: string; reason?: 'unreachable' | 'timeout' | 'query_failed' };
   checks: { smoke: number; invariants: number };
