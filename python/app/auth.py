@@ -49,8 +49,8 @@ def _cookie(response: Response, name: str, value: str, max_age: int) -> None:
 
 # AUTH-5: on a target with its own sign-in ([auth] provider = "edge"), the target's gate signs people in before a request
 # reaches this app and says who it is in two headers; the app trusts them (its pods are reachable only through the gate)
-# and keeps no session of its own. A user's id is fixed by their email. AGC_EDGE_DEV_USER stands in on mirrors and in
-# rehearsals, where no gate runs; production never has it.
+# and keeps no session of its own. A user's id is fixed by their email. On a mirror, agent.cloud's web proxy sets the
+# headers to a test identity; it never sets AGC_EDGE_DEV_USER, which stands in only where you set it yourself.
 EDGE = os.environ.get("AGC_AUTH_PROVIDER") == "edge"
 DEV_USER = os.environ.get("AGC_EDGE_DEV_USER", "")
 
