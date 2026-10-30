@@ -40,8 +40,8 @@ const cookie = { httpOnly: true, sameSite: 'Lax', secure: !onMirror, path: '/' }
 
 // AUTH-5: on a target with its own sign-in ([auth] provider = "edge"), the target's gate signs people in before a request
 // reaches this app and says who it is in two headers; the app trusts them (its pods are reachable only through the gate)
-// and keeps no session of its own. A user's id is fixed by their email. AGC_EDGE_DEV_USER stands in on mirrors and in
-// rehearsals, where no gate runs; production never has it.
+// and keeps no session of its own. A user's id is fixed by their email. On a mirror, agent.cloud's web proxy sets the
+// headers to a test identity; it never sets AGC_EDGE_DEV_USER, which stands in only where you set it yourself.
 const EDGE = process.env.AGC_AUTH_PROVIDER === 'edge';
 const DEV_USER = process.env.AGC_EDGE_DEV_USER ?? '';
 const idOf = (email: string) => { const h = createHash('sha256').update(`agc-edge:${email}`).digest('hex'); return `${h.slice(0, 8)}-${h.slice(8, 12)}-5${h.slice(13, 16)}-8${h.slice(17, 20)}-${h.slice(20, 32)}`; };
