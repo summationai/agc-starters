@@ -1,7 +1,7 @@
 """DATA-8: the pool keeps idle connections 60 s, in production and on a mirror (AGENTCLOUD_MIRROR set) alike, holds none
-at its minimum and opens at most 10. Each case loads app.db in its own process, with that environment, and reads the pool
-it made. No database is involved: the pool is made with open=False, so it connects only once the app opens it, and the
-address below is a fake nobody answers on."""
+at its minimum, opens at most 10, and sheds idle ones one per minute. Each case loads app.db in its own process, with
+that environment, and reads the pool it made. No database is involved: the pool is made with open=False, so it connects
+only once the app opens it, and the address below is a fake nobody answers on."""
 
 import json
 import os
@@ -15,7 +15,11 @@ ROOT = Path(__file__).resolve().parent.parent
 def pool_of(**env: str) -> dict[str, float]:
     base = {k: v for k, v in os.environ.items() if k not in ("AGENTCLOUD_MIRROR", "AGC_RUN")}
     r = subprocess.run(
-        [sys.executable, "-c", "import json; from app.db import pool; print(json.dumps({'idle': pool.max_idle, 'max': pool.max_size, 'min': pool.min_size}))"],
+        [
+            sys.executable,
+            "-c",
+            "import json; from app.db import pool; print(json.dumps({'idle': pool.max_idle, 'max': pool.max_size, 'min': pool.min_size}))",
+        ],
         cwd=ROOT,
         env={**base, "DATABASE_URL": "postgresql://test@127.0.0.1:9/test", **env},
         capture_output=True,
@@ -35,8 +39,9 @@ def test_data_8_idle_connections_stay_60_s_in_production_rehearsals_and_on_a_mir
     assert pool_of(AGENTCLOUD_MIRROR="dev") == want
 
 
-def test_data_8_a_quiet_app_holds_no_connection_a_minute_after_its_last_request() -> None:
-    # Well inside the 5 minutes after which Neon suspends its database.
+def test_data_8_a_quiet_app_sheds_every_connection_so_its_database_can_sleep() -> None:
+    # psycopg_pool closes at most one idle connection per max_idle, so a full pool drains in about (max_size + 1) * max_idle:
+    # 11 minutes for 10 connections. min_size 0 is what lets it reach none, after which Neon suspends in 5 minutes.
     pool = pool_of(AGC_RUN="live")
     assert pool["min"] == 0
-    assert pool["idle"] <= 60 < 5 * 60
+    assert (pool["max"] + 1) * pool["idle"] <= 11 * 60

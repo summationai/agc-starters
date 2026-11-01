@@ -60,7 +60,7 @@ async def add_note(request: Request, body: NoteIn) -> Response:
 ## Rules this stack keeps
 
 - Health (`/api/health`) never touches the database. agent.cloud asks it every 2 seconds.
-- The pool keeps idle connections about 60 s, in production and on a mirror, so a request within a minute reuses one, and holds none after that, so the database can sleep (`app/db.py`). From a laptop a mirror query costs about 0.25 s and a new connection about 1.7 s: fetch what a page needs in one query, not one per row.
+- The pool keeps idle connections about 60 s, in production and on a mirror, so a request within a minute reuses one. It then closes them one per minute until none is left, so the database can sleep (`app/db.py`). From a laptop a mirror query costs about 0.25 s and a new connection about 1.7 s: fetch what a page needs in one query, not one per row.
 - Uvicorn binds `0.0.0.0`, never its `127.0.0.1` default. It logs JSON, with no access log (agent.cloud's router keeps one).
 - Sign-in checks `state` before trading the code. Sessions last a day. Cookies are `__Host-` cookies outside a mirror: apps share the agent.cloud site, and the prefix stops a neighbour app from planting one. Any cookie you add keeps that rule (`secure=True`, `path="/"`, no `domain`).
 - On SIGTERM, web and the worker finish what's in flight and exit.
