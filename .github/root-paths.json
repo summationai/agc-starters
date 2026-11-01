@@ -1,10 +1,20 @@
 {
-  "about": "RAC-19's list for agc-starters, read from main by root Crew's builder and merger (agent-runtime-v2 #415). Crew may change and merge any path but these: workflows and this file are denied, so only a person changes them; SPEC.md, the contract every starter and every app follows, is held, so Crew may prepare a change to it but a person merges it (rc, 1 Nov 2026).",
+  "about": "RAC-19's list for agc-starters, read from main by root Crew's builder and merger (agent-runtime-v2 #415). Crew may change and merge any path but these: workflows and this file are denied, so only a person changes them. Held, so Crew may prepare a change but a person merges it (rc, 1 Nov 2026): SPEC.md, the contract every starter and every app follows; and each stack's dependencies and base images (package manifests and lockfiles, npm settings, Python's pyproject.toml and uv.lock, Dockerfiles), since every new app copies the starters and a change there is a supply-chain change.",
   "version": 2,
   "deny": [
     ".github/**"
   ],
   "hold": [
-    "SPEC.md"
+    "SPEC.md",
+    "**/package.json",
+    "**/package-lock.json",
+    "**/npm-shrinkwrap.json",
+    "**/.npmrc",
+    "**/.nvmrc",
+    "**/pyproject.toml",
+    "**/uv.lock",
+    "**/Dockerfile",
+    "**/Dockerfile.*",
+    "**/.dockerignore"
   ]
 }
