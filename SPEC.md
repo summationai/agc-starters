@@ -13,6 +13,8 @@ A starter is a directory, `<language>/`, holding a complete, working app: a Reac
 
 The same UI is shared by every stack, so stacks differ only in the server, the worker and the build.
 
+**How an app grows from it.** An agent builds the main flow first, with whatever keeps the app's data, secrets and sign-in safe, and ships it. It adds a guard, retry or fallback when a check, a log or a person's report shows the case, not for one nobody has seen yet, and notes those as later work. Before adding code, it looks for what it can delete. It proves a change with `agc check` and `agc verify` on its mirror, and says how it proved it, or that it isn't proven. The starter has that shape: the notes app is its main flow, and its rules are what keeps it safe.
+
 ## 1. Manifest
 
 - **MAN-1:** `agentcloud.toml` at the starter's root has `[app] name = "starter"` (`agc init` replaces it), `[service.web]` with `port`, `dev` and `health`, `[service.worker]` with `command` and `dev`, and `[data.db]` with `env = "DATABASE_URL"` and `migrations = "migrations/"`. `LINT:manifest` (keys as `packages/cli/src/config.ts` appConfig reads them).
