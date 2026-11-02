@@ -12,12 +12,6 @@ on:
 permissions:
   contents: write
 
-# One release at a time. GitHub keeps one pending run per group, not a queue, so a run may be dropped or wake out of order:
-# each run releases main's newest passed commit (scripts/newest-passed.sh), not the commit that woke it, so nothing is lost.
-concurrency:
-  group: release
-  cancel-in-progress: false
-
 defaults:
   run:
     shell: bash
@@ -29,6 +23,13 @@ jobs:
       github.event.workflow_run.conclusion == 'success' &&
       github.event.workflow_run.event == 'push' &&
       github.event.workflow_run.head_repository.full_name == github.repository
+    # One release at a time, on the job and so after its guard: a run that isn't eligible (a failed conformance run) never
+    # enters the group. GitHub keeps one pending job per group, not a queue, so an eligible one may still replace another or
+    # wake out of order; each releases main's newest passed commit (scripts/newest-passed.sh), not the commit that woke it,
+    # so nothing is lost.
+    concurrency:
+      group: release
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}

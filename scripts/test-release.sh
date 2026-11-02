@@ -81,5 +81,11 @@ g tag v1.1.2 "$b"; RELEASED="$RELEASED v1.1.2"
 expect "a, older and untagged, is in b's release already" "none $a" "$(next "$a")"
 PASSED=""; expect "nothing passed is an error, never a guess" "error" "$(if scripts/newest-passed.sh >/dev/null 2>&1; then echo picked; else echo error; fi)"
 
+# codex on #35: concurrency sits on the guarded job, never the whole workflow, so a failed conformance run's workflow
+# can't replace an eligible pending release and then skip its own job.
+wf="$here/../.github/workflows/release.yml"
+expect "release.yml has no workflow-level concurrency" "" "$(grep -n '^concurrency:' "$wf" || true)"
+expect "its release job, after its guard, has one" "1" "$(awk '/^  release:/{j=1} j && /^    if:/{g=1} g && /^    concurrency:/{print 1; exit}' "$wf")"
+
 [ "$failed" = 0 ] && echo "all passed"
 exit "$failed"
