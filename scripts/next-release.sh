@@ -3,13 +3,13 @@
 #
 #   new v1.2.4        tag the commit v1.2.4, then publish it: the next patch after the highest vX.Y.Z tag
 #   publish v1.3.0    the commit already has this tag, and the tag has no GitHub Release yet: publish it
-#   none <why>        nothing to release: it's released already, or nothing a release holds changed
+#   none <why>        nothing to release: it's released already, a later release holds it, or the archive is unchanged
 #
 #   scripts/next-release.sh <commit>
 #
-# What a release holds is what scripts/release.sh archives: every stack (a directory with agentcloud.toml, at the last
-# tag or at the commit), SPEC.md and LICENSE, less each conformance.toml (.gitattributes export-ignore). `gh` answers
-# whether a tag has its Release; GH_TOKEN must be set.
+# A release is due when what scripts/archive.sh builds at the commit differs from what it builds at the last tag: any file
+# added, removed or changed, or its executable bit, whatever caused it (a stack, SPEC.md, LICENSE or .gitattributes).
+# `gh` answers whether a tag has its Release; GH_TOKEN must be set.
 set -eu
 sha=$(git rev-parse --verify "${1:?usage: scripts/next-release.sh <commit>}^{commit}")
 cd "$(dirname "$0")/.."
@@ -26,12 +26,18 @@ if ! git merge-base --is-ancestor "$last" "$sha"; then
   echo "$last isn't in $sha's history, so there's no next patch to give it" >&2
   exit 1
 fi
-stacks=$( { git ls-tree -d --name-only "$last"; git ls-tree -d --name-only "$sha"; } | sort -u | while read -r d; do
-  if git cat-file -e "$last:$d/agentcloud.toml" 2>/dev/null || git cat-file -e "$sha:$d/agentcloud.toml" 2>/dev/null; then echo "$d"; fi
-done)
-# shellcheck disable=SC2086 # the stack names are plain directory names
-if git diff --quiet "$last" "$sha" -- $stacks SPEC.md LICENSE ':(exclude,glob)**/conformance.toml'; then
-  echo "none nothing a release holds changed since $last"
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+held() {
+  mkdir "$work/$2"
+  scripts/archive.sh "$1" "$work/$2.tar" >/dev/null
+  tar -x -f "$work/$2.tar" -C "$work/$2"
+  (cd "$work/$2" && find . -type f -perm -u+x | sort) > "$work/$2.exec"
+}
+held "$last" was
+held "$sha" now
+if diff -r "$work/was" "$work/now" >/dev/null && cmp -s "$work/was.exec" "$work/now.exec"; then
+  echo "none what a release holds is unchanged since $last"
   exit 0
 fi
 rest=${last#v}

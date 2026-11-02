@@ -15,14 +15,11 @@ cd "$(dirname "$0")/.."
 git rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "no tag $tag: tag the commit first (git tag $tag && git push origin $tag)" >&2; exit 1; }
 # What goes in must be at the tag, not just in the working tree.
 for f in SPEC.md LICENSE; do git cat-file -e "$tag:$f" 2>/dev/null || { echo "$f is missing at $tag: commit it, then tag again" >&2; exit 1; }; done
-stacks=$(git ls-tree -d --name-only "$tag" | while read -r d; do git cat-file -e "$tag:$d/agentcloud.toml" 2>/dev/null && echo "$d"; done)
 mkdir -p dist
 out="dist/starters-$tag.tgz"
-[ -n "$stacks" ] || { echo "no stack at $tag" >&2; exit 1; }
 # To a file first, not a pipe: sh has no pipefail, so a failing git archive would still leave gzip's empty output.
 rm -f "dist/starters-$tag.tar" "$out"
-# shellcheck disable=SC2086 # the stack names are plain directory names
-git archive --format=tar -o "dist/starters-$tag.tar" "$tag" $stacks SPEC.md LICENSE
+stacks=$(scripts/archive.sh "$tag" "dist/starters-$tag.tar")
 gzip -9 -n -c "dist/starters-$tag.tar" > "$out"
 rm -f "dist/starters-$tag.tar"
 [ "$(wc -c < "$out")" -gt 1024 ] || { echo "$out is suspiciously small" >&2; exit 1; }
