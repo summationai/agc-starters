@@ -1,0 +1,80 @@
+# The starters release themselves on merge (CONTRIBUTING.md, "Releasing"): once a commit pushed to main passes conformance,
+# the newest passed commit on main is released if what a release holds changed: tagged with the next patch version and
+# published by scripts/release.sh, the published asset's sha256 checked against the one it built. agent-cloud's pin moves
+# in a reviewed PR there (STK-4).
+name: release
+on:
+  workflow_run:
+    workflows: [conformance]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: write
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  release:
+    # Only a push to this repository's main that passed: never a pull request's run, nor a fork's branch named main.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    # One release at a time, on the job and so after its guard: a run that isn't eligible (a failed conformance run) never
+    # enters the group. GitHub keeps one pending job per group, not a queue, so an eligible one may still replace another or
+    # wake out of order; each releases main's newest passed commit (scripts/newest-passed.sh), not the commit that woke it,
+    # so nothing is lost.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # main's scripts, with every commit and tag.
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - name: decide
+        id: decide
+        run: |
+          set -euo pipefail
+          git fetch --tags --force origin
+          sha=$(scripts/newest-passed.sh origin/main)
+          said=$(scripts/next-release.sh "$sha")
+          echo "$sha: $said"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "what=${said%% *}" >> "$GITHUB_OUTPUT"
+          echo "tag=$(echo "$said" | awk '$1 != "none" { print $2 }')" >> "$GITHUB_OUTPUT"
+      - name: tag
+        if: steps.decide.outputs.what == 'new'
+        env:
+          SHA: ${{ steps.decide.outputs.sha }}
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          git tag "$TAG" "$SHA"
+          git push origin "refs/tags/$TAG"
+      - name: publish
+        if: steps.decide.outputs.what == 'new' || steps.decide.outputs.what == 'publish'
+        env:
+          SHA: ${{ steps.decide.outputs.sha }}
+          TAG: ${{ steps.decide.outputs.tag }}
+        run: |
+          set -euo pipefail
+          out=$(scripts/release.sh "$TAG" --publish)
+          echo "$out"
+          sum=$(echo "$out" | sed -n 's/^sha256: //p')
+          gh release download "$TAG" --pattern "starters-$TAG.tgz" --dir published
+          got=$(sha256sum "published/starters-$TAG.tgz" | cut -d' ' -f1)
+          [ "$got" = "$sum" ] || { echo "the published starters-$TAG.tgz has sha256 $got, not the $sum it was built with" >&2; exit 1; }
+          {
+            echo "### Starters $TAG"
+            echo
+            echo "Released \`$SHA\` as \`$TAG\`: \`starters-$TAG.tgz\`, sha256 \`$sum\`."
+            echo
+            echo "agent-cloud's \`agc init --stack\` moves to it in a reviewed PR to \`packages/cli/src/starters.ts\` (STK-4)."
+          } >> "$GITHUB_STEP_SUMMARY"
