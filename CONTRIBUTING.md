@@ -41,4 +41,9 @@ A stack is a directory, `<language>/`, holding the same notes app ([SPEC.md §11
 
 ## Releasing
 
-Tag the commit, then run `scripts/release.sh v1.2.3 --publish`. It builds `dist/starters-v1.2.3.tgz`: every stack, SPEC.md and LICENSE, without the conformance descriptors. It prints the sha256, and creates the GitHub Release with the file attached. agent-cloud's CLI pins that version and sha256.
+A merge to main releases itself. Once its commit passes conformance on main, `.github/workflows/release.yml` asks `scripts/next-release.sh` what it gets:
+- **A change to what a release holds** (a stack, SPEC.md or LICENSE, but not a stack's `conformance.toml`) since the highest `vX.Y.Z` tag is tagged the next patch version (v1.2.3 to v1.2.4). Then `scripts/release.sh <tag> --publish` publishes it, and the published asset's sha256 is checked against the one it built.
+- **Anything else** releases nothing: a change only to docs, CI or the conformance suite, a commit already released, or one a later release already holds (its run finished last).
+- **A commit tagged by hand** with no Release yet is published under that tag. That's how a minor or major version goes out: tag the merge commit (`git tag v1.3.0 && git push origin v1.3.0`) before its conformance run ends, or run `scripts/release.sh v1.3.0 --publish` yourself. The next automatic release counts on from it.
+
+`scripts/release.sh` builds `dist/starters-<tag>.tgz`: every stack, SPEC.md and LICENSE, without the conformance descriptors. It prints the sha256, and creates the GitHub Release with the file attached. agent-cloud's CLI pins one version and its sha256 (STK-4 in agent-cloud's `docs/specs/init-stack.md`), and moving the pin is a reviewed PR there. The release's notes and its run's summary give the sha256 that PR needs.
