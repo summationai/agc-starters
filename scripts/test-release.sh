@@ -26,12 +26,13 @@ export PATH RELEASED PASSED GITHUB_REPOSITORY=summationai/agc-starters
 
 r="$t/repo"
 mkdir -p "$r/scripts" "$r/ts"
-cp "$here/archive.sh" "$here/next-release.sh" "$here/newest-passed.sh" "$r/scripts/"
+cp "$here/archive.sh" "$here/next-release.sh" "$here/newest-passed.sh" "$here/release.sh" "$r/scripts/"
 cd "$r"
 git init -q -b main
 g() { git -c user.name=test -c user.email=test@example.test "$@"; }
 printf '[app]\nname = "starter"\n' > ts/agentcloud.toml
 echo 'export const a = 1;' > ts/app.ts
+echo '# the stack' > ts/AGENTS.md
 echo '# the suite' > ts/conformance.toml
 echo 'conformance.toml export-ignore' > .gitattributes
 echo 'spec' > SPEC.md; echo 'license' > LICENSE; echo 'readme' > README.md
@@ -46,9 +47,19 @@ c=$(change sh -c 'echo more >> README.md'); expect "a docs change releases nothi
 c=$(change sh -c 'echo more >> ts/conformance.toml'); expect "a conformance.toml change releases nothing" "none what" "$(next "$c")"; back
 c=$(change sh -c 'echo "export const b = 2;" >> ts/app.ts'); expect "a stack change is the next patch" "new v1.0.1" "$(next "$c")"; back
 c=$(change sh -c 'echo more >> SPEC.md'); expect "a SPEC.md change is the next patch" "new v1.0.1" "$(next "$c")"; back
-c=$(change sh -c 'mkdir py && printf "[app]\nname = \"starter\"\n" > py/agentcloud.toml'); expect "a new stack is the next patch" "new v1.0.1" "$(next "$c")"; back
+c=$(change sh -c 'mkdir py && printf "[app]\nname = \"starter\"\n" > py/agentcloud.toml && echo "# py" > py/AGENTS.md'); expect "a new stack is the next patch" "new v1.0.1" "$(next "$c")"; back
 # security-agent on #35: .gitattributes changes what git archive holds without touching a stack.
-c=$(change sh -c 'echo "SPEC.md export-ignore" >> .gitattributes'); expect ".gitattributes leaving SPEC.md out is the next patch" "new v1.0.1" "$(next "$c")"; back
+# security-agent on #35, again: an archive missing what agc init needs is refused, never decided on or published.
+refused() { if "$@" >/dev/null 2>&1; then echo went; else echo refused; fi; }
+c=$(change sh -c 'echo "SPEC.md export-ignore" >> .gitattributes')
+expect ".gitattributes leaving SPEC.md out is refused, not released" "refused" "$(refused scripts/next-release.sh "$c")"
+expect "archive.sh says which file is missing" "SPEC.md is missing from the archive at $c: is .gitattributes leaving it out?" "$(scripts/archive.sh "$c" "$t/x.tar" 2>&1 >/dev/null)"
+g tag v9.9.9 "$c"
+expect "release.sh --publish refuses it too, and leaves no tarball" "refused, none left" "$(r=$(refused scripts/release.sh v9.9.9 --publish); if ls dist/starters-v9.9.9.* >/dev/null 2>&1; then echo "$r, one left"; else echo "$r, none left"; fi)"
+g tag -d v9.9.9 >/dev/null; rm -rf dist; back
+c=$(change sh -c 'echo "ts/AGENTS.md export-ignore" >> .gitattributes'); expect "a stack's AGENTS.md left out is refused" "refused" "$(refused scripts/next-release.sh "$c")"; back
+c=$(change sh -c 'echo "LICENSE export-ignore" >> .gitattributes'); expect "LICENSE left out is refused" "refused" "$(refused scripts/next-release.sh "$c")"; back
+c=$(change sh -c 'echo "README.md export-ignore" >> .gitattributes'); expect "a .gitattributes change to a file no release holds releases nothing" "none what" "$(next "$c")"; back
 c=$(change sh -c 'echo "# a comment" >> .gitattributes'); expect "a .gitattributes change the archive doesn't show releases nothing" "none what" "$(next "$c")"; back
 c=$(change sh -c 'chmod +x ts/app.ts'); expect "an executable bit is the next patch" "new v1.0.1" "$(next "$c")"; back
 c=$(change sh -c 'echo "export const c = 3;" >> ts/app.ts'); g tag v1.1.0 "$c"
