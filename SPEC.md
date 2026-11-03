@@ -140,6 +140,7 @@ Files people upload go to the app's bucket through signed URLs, never through th
 - **DOC-1:** `README.md` says what the starter is, the one command to run it locally, where the server, worker, UI, migrations and checks live, and how to add an API route and a job. `review`
 - **DOC-2:** `AGENTS.md` holds the stack section only: the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `agc init` appends agent.cloud's own section after it (`packages/cli/src/commands/init.ts` writeAgentsMd), so the starter's file must not contain agc's heading `# agent.cloud: how to work on this app`. `LINT:agents-md`
 - **DOC-3:** `AGENTS.md` tells the agent to keep business logic in the app's code, not in database triggers, and to use a trigger only for simple per-row bookkeeping such as `updated_at`, with the reason: a trigger hides behaviour from the code a reviewer reads, and agent.cloud's masked copies and migration checks handle triggers poorly. It's guidance; nothing refuses a trigger. agent.cloud's own AGENTS.md says the same (its TRG-1 and TRG-2). `LINT:agents-md`
+- **DOC-4:** `AGENTS.md` asks the agent to say what it's about to do at each step with `agc now "<text>"`, one line of up to 120 characters, so the people watching it build an open Work item read its steps in its own words (agent.cloud's LIVE-21). It's a request; nothing refuses a build without it. `LINT:agents-md`
 
 ## 11. The starter app
 
