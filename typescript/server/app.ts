@@ -49,7 +49,7 @@ app.use(async (c, next) => {
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
 
 // The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
-app.get('/api/welcome', async (c) => c.json(await welcome()));
+app.get('/api/welcome', async (c) => c.json(await welcome(process.env, c.req.header('x-agc-preview'))));
 
 // Only the API and sign-in look up the session: the UI's files never wait on the database.
 app.use('/api/*', session);
