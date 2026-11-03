@@ -49,7 +49,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 `agc up` runs `[service.web] dev` and `[service.worker] dev` with the mirror's environment: `PORT`, `DATABASE_URL`, `AGC_*`, and `AGENTCLOUD_MIRROR` (`packages/cli/src/commands/mirror.ts`).
 
 - **DEV-1:** `dev` serves the whole app, UI and API, on `$PORT`. `CONF:dev-routes` (including same-origin POSTs through any dev proxy, while another origin is still refused under SEC-6)
-- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. The suite makes one untimed warm-up edit first (a first compile can be slow on a cold CI runner), then times the next one. `CONF:reload-api` (with a connection held open through both saves, as a browser preconnects one, so a dev server that waits on open connections before it restarts fails it)
+- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. The suite makes one untimed warm-up edit first (a first compile can be slow on a cold CI runner), then times the next one. `CONF:reload-api` (with a connection held open at each save, as a browser preconnects one, so a dev server that waits on open connections before it restarts fails it)
 - **DEV-3:** Saving a UI source file changes what the browser loads within 5 s (hot module reload, or the next page load), with no manual restart. `CONF:reload-ui`
 - **DEV-4:** Saving a worker source file restarts the worker within 5 s. `CONF:reload-worker`
 - **DEV-5:** `dev` needs nothing a fresh clone lacks beyond the language's toolchain: the first run installs dependencies itself, or the README says the one command that does. `CONF:dev-routes` (run from a clean copy)

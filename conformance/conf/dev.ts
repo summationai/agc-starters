@@ -2,7 +2,7 @@
 // the source with the mirror's environment; then a server file, a UI file and a worker file are edited (each edit is
 // made inside the container, as an editor on the laptop would) and each change must land within 5 s, with no restart.
 import { copyFileSync, mkdirSync } from 'node:fs';
-import { connect } from 'node:net';
+import { connect, type Socket } from 'node:net';
 import { dirname, join } from 'node:path';
 import { type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, type TestResult } from '../lib/report.ts';
@@ -135,21 +135,26 @@ async function reloadHttp(env: Env, web: Container, r: Reload | undefined): Prom
   const before = await req(env, web, jar, 'GET', r.url);
   if (before.text.includes(r.expect)) return fail(`${r.url} already contains "${r.expect}" before the edit`);
   const body = async () => (await req(env, web, new Map(), 'GET', r.url!)).text;
-  // DEV-2: a connection held open through both saves, as a browser preconnects one: a dev server that waits on it before
-  // it restarts doesn't change in time (agc-starters' TypeScript dev.ts waited a minute on one).
-  const held = connect(web.port!, '127.0.0.1').on('error', () => {});
+  // DEV-2: a connection held open at each save, as a browser preconnects one: a dev server that waits on it before it
+  // restarts doesn't change in time (agc-starters' TypeScript dev.ts waited a minute on one). A server that ends at once
+  // closes the first, so each save opens its own.
+  const held: Socket[] = [];
+  const hold = () => { held.push(connect(web.port!, '127.0.0.1').on('error', () => {})); };
   try {
-    return await timedReload(web, r, body);
+    return await timedReload(web, r, body, hold);
   } finally {
-    held.destroy();
+    for (const s of held) s.destroy();
   }
 }
 
-async function timedReload(web: Container, r: Reload, body: () => Promise<string>): Promise<TestResult> {
+async function timedReload(web: Container, r: Reload, body: () => Promise<string>, hold: () => void): Promise<TestResult> {
   // A warm-up save, untimed (a first compile can be slow on a cold runner); then the timed one puts the file back.
+  hold();
+  await sleep(SETTLE_MS);
   await edit(web, r.file, r.find, r.replace);
   const warm = await until(60_000, async () => ((await body()).includes(r.expect) ? true : undefined), 250);
   if (!warm) return fail(`${r.url} didn’t change within 60 s of saving ${r.file}`);
+  hold();
   await sleep(SETTLE_MS);
   const t0 = await edit(web, r.file, r.replace, r.find);
   const seen = await until(15_000, async () => (!(await body()).includes(r.expect) ? Date.now() : undefined), 200);
