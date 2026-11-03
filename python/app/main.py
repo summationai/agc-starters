@@ -80,8 +80,8 @@ def health() -> dict[str, str]:
 
 # The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
 @app.get("/api/welcome")
-async def welcome() -> dict[str, Any]:
-    return await welcome_facts(os.environ)
+async def welcome(request: Request) -> dict[str, Any]:
+    return await welcome_facts(os.environ, request.headers.get("x-agc-preview"))
 
 
 app.include_router(auth_router)

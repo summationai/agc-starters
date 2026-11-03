@@ -69,7 +69,7 @@ function releasedDone(html: string): boolean {
 }
 
 const CHIP: Record<string, string> = {
-  mirror: 'Running on this machine', live: 'Live at', rehearsal: 'A rehearsal of a release, not live yet.',
+  mirror: 'Running on this machine', private: 'Private preview: publish to go live at', live: 'Live at', rehearsal: 'A rehearsal of a release, not live yet.',
   preview: 'A preview, not live', unknown: "This page can't tell where it's running.",
 };
 const NOT_RELEASED = ['reserved, not released', 'Nothing was public when this copy started', 'nothing was released at'];
@@ -109,6 +109,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       ['mirror, production unknown', facts({ run: 'mirror', production: null })],
       ['mirror, reserved', facts({ run: 'mirror', production: { url: URL_, version: null } })],
       ['mirror, released v3', facts({ run: 'mirror', production: { url: URL_, version: 3 } })],
+      ['private', facts({ run: 'private' })],
       ['live', facts({ run: 'live' })],
       ['rehearsal', facts({ run: 'rehearsal' })],
       ['preview', facts({ run: 'preview', preview_expires_at: '2026-10-28T04:00:00.000Z' })],
@@ -126,7 +127,9 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       } else {
         if (releasedDone(html)) p9.push(`${label}: the "released" step is marked done`);
         const released = f.run === 'mirror' && f.production?.version != null;
-        if (!released) never(p9, label, t.replace(/not live/gi, ''), /\blive\b/i);
+        // Only live claims the app is public: the other rows say live only as "not live", and private as "publish to go live".
+        if (!released) never(p9, label, t.replace(f.run === 'private' ? /not live|publish to go live/gi : /not live/gi, ''), /\blive\b/i);
+        if (f.run === 'private') want(p9, label, t, new RegExp(`publish to go live at\\s+${hereOf('private').replace(/\./g, '\\.')}`));
       }
       if (f.run === 'mirror') {
         want(p9, label, t, hereOf('mirror'));
@@ -231,7 +234,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
     const summary = `${cases.length} welcome renders (every run, the mirror in each production state) and 3 Notes renders`;
     return (all.length ? fail : pass)(all.length ? all.slice(0, 6).join('; ') : summary, {
       'APP-7': verdict(!p7.length, p7.length ? p7.join('; ') : '/ renders the welcome page and /notes renders Notes, each with its own text; main.tsx routes both; Notes signs in with return_to=/notes'),
-      'APP-9': verdict(!p9.length, p9.length ? p9.join('; ') : 'each run shows exactly its own status words; "Live at" and a done "released" step only when live; the mirror\u2019s line follows production'),
+      'APP-9': verdict(!p9.length, p9.length ? p9.join('; ') : 'each run shows exactly its own status words; "Live at" and a done "released" step only when live; private says publish to go live at its address, and no run but live claims the app is public; the mirror\u2019s line follows production'),
       'APP-13': verdict(!p13.length, p13.length ? p13.join('; ') : 'not-released copy only on a reserved mirror, released copy only with a version; nothing animates under reduced motion; no console link; the footer names the stack and no version; Worker and Sign-in say what the facts say; no per-note email status'),
     });
   } catch (e) {
@@ -273,10 +276,10 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
   const s = env.stack;
   const SENTINEL = `agcsentinel${randomBytes(8).toString('hex')}`;
   const name = `conf-${tag()}`;
-  const call = async (c: Container, path = '/api/welcome', ms = 10_000): Promise<Answer> => {
+  const call = async (c: Container, path = '/api/welcome', ms = 10_000, headers: Record<string, string> = {}): Promise<Answer> => {
     const t0 = Date.now();
     try {
-      const r = await fetch(`${env.base(c)}${path}`, { signal: AbortSignal.timeout(ms) });
+      const r = await fetch(`${env.base(c)}${path}`, { headers, signal: AbortSignal.timeout(ms) });
       const text = await r.text();
       let json: Record<string, unknown> | null = null;
       try { json = JSON.parse(text) as Record<string, unknown>; } catch { /* not JSON */ }
@@ -418,6 +421,15 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
       if (c.signin && ps.signin !== c.signin) p10.push(`${c.key}: signin ${ps.signin}, not ${c.signin}`);
       if (c.email && ps.email !== c.email) p10.push(`${c.key}: email ${ps.email}, not ${c.email}`);
     }));
+    // APP-9's private: the preview gate's X-Agc-Preview: private lowers a live process to private, and nothing else does; a
+    // mirror stays a mirror.
+    for (const [key, header, want] of [['live (production off a mirror)', 'private', 'private'], ['live (production off a mirror)', 'published', 'live'], ['mirror+live, released empty', 'private', 'mirror']] as const) {
+      const i = cases.findIndex((c) => c.key === key);
+      if (runUp[i] !== 'ready') continue; // already reported above
+      const a = await call(runs[i]!, '/api/welcome', 10_000, { 'x-agc-preview': header });
+      seen.push(`${key} with X-Agc-Preview: ${header} \u2192 ${String(a.json?.run)}`);
+      if (a.json?.run !== want) p9.push(`${key} with X-Agc-Preview: ${header}: run ${JSON.stringify(a.json?.run)}, not ${want}`);
+    }
     // APP-10: sign-in is configured only with both halves. A starter that refuses to start without both (PROC-9) never
     // shows it at all, which can't overclaim either.
     const signinSeen: string[] = [];
