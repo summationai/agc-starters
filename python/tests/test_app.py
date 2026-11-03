@@ -292,13 +292,13 @@ def _claiming(monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None) ->
 
 def test_auth_8_a_session_another_recheck_ended_meanwhile_is_not_let_in(monkeypatch: pytest.MonkeyPatch) -> None:
     _claiming(monkeypatch, None)
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(get=lambda *_, **__: pytest.fail("asked agent.cloud")))
+    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=lambda *_, **__: pytest.fail("asked agent.cloud")))
     assert auth._still_let_in("gone", "u1", 0.0) is False
 
 
 def test_auth_8_a_recheck_another_process_just_made_is_not_made_again(monkeypatch: pytest.MonkeyPatch) -> None:
     _claiming(monkeypatch, {"claimed": False})
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(get=lambda *_, **__: pytest.fail("asked agent.cloud")))
+    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=lambda *_, **__: pytest.fail("asked agent.cloud")))
     assert auth._still_let_in("asked", "u1", 0.0) is True
 
 
@@ -307,12 +307,17 @@ def test_auth_8_only_a_404_ends_the_session_and_it_sends_the_start(monkeypatch: 
     ran = _claiming(monkeypatch, {"claimed": True})
     sent: dict[str, str] = {}
 
-    def get(url: str, headers: dict[str, str], timeout: float) -> httpx.Response:
-        sent.update(headers, url=url)
-        return httpx.Response(status)
+    def never_read(*_: object) -> None:
+        pytest.fail("read the body")
 
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(get=get, HTTPError=httpx.HTTPError))
+    @contextmanager
+    def stream(method: str, url: str, headers: dict[str, str], timeout: float) -> Iterator[SimpleNamespace]:
+        sent.update(headers, url=url, method=method)
+        yield SimpleNamespace(status_code=status, read=never_read, iter_bytes=never_read, text=None)  # the body is never read
+
+    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=stream, HTTPError=httpx.HTTPError))
     assert auth._still_let_in("due", "u1", 1700000000.5) is kept
+    assert sent["method"] == "GET"
     assert sent["x-agc-session-start"] == "1700000000500" and sent["url"].endswith("/users/u1")
     assert ran == (["UPDATE", "DELETE"] if status == 404 else ["UPDATE"])
 
@@ -323,5 +328,5 @@ def test_auth_8_unreachable_agent_cloud_keeps_the_session(monkeypatch: pytest.Mo
     def get(*_: object, **__: object) -> None:
         raise httpx.ConnectTimeout("no answer")
 
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(get=get, HTTPError=httpx.HTTPError))
+    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=get, HTTPError=httpx.HTTPError))
     assert auth._still_let_in("due", "u1", 0.0) is True

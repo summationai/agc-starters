@@ -100,21 +100,24 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
     if not claim["claimed"]:
         return True  # another process just asked
     try:
-        r = httpx.get(
+        # The status is the answer: the body is never read, so a slow one can't hold the session's requests.
+        with httpx.stream(
+            "GET",
             f"{AUTH_URL}/users/{user_id}",
             headers={"authorization": f"Bearer {AUTH_TOKEN}", "x-agc-session-start": str(int(started * 1000))},
             timeout=5,
-        )
+        ) as r:
+            status = r.status_code
     except httpx.HTTPError as e:
         log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
         return True
-    if r.status_code == 404:  # ended before anyone waiting hears it, so no request after this one finds the session
+    if status == 404:  # ended before anyone waiting hears it, so no request after this one finds the session
         with pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE token_hash = %s", (key,))
         log.info("session ended: agent.cloud no longer lets this person in", user=user_id)
         return False
-    if not r.is_success:
-        log.warn("session recheck unanswered, keeping the session", user=user_id, status=r.status_code)
+    if not 200 <= status < 300:
+        log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
     return True
 
 
