@@ -2,15 +2,19 @@
   GET  /auth/sign-in    a fresh state (and ?return_to, a path here) in short cookies, then off to $AGC_AUTH_URL/authorize
   GET  /auth/callback   check state FIRST, then trade the code (once, within a minute) for the person, and go back
   POST /auth/sign-out   end this session
-Sessions are rows in the database (only a hash of the token is stored) and last a day."""
+Sessions are rows in the database (only a hash of the token is stored) and last a day. Each is rechecked with agent.cloud
+at most once every 5 minutes (SPEC.md AUTH-8)."""
 
 import hashlib
 import os
 import re
 import secrets
+import time
+from concurrent.futures import Future
 from typing import Any
 
 import httpx
+import psycopg
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
@@ -75,18 +79,119 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
     return {"id": user_id, "email": email, "name": name}
 
 
+# AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
+# session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
+# cutoff stays refused even after they sign in again. A 2xx keeps it. A timeout, a 5xx or a network error keeps it too,
+# since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
+# Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
+# a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
+# The session row's checked_at says where it stands: when agent.cloud last kept it (never, for a new one, counts as when
+# it began); 'infinity' while a recheck is under way; '-infinity' once refused, if it couldn't be deleted. A recheck is
+# claimed by setting 'infinity', so the session lets no one in until an answer that keeps it is written: a refusal, or an
+# answer this app fails to write, leaves it refused for good (they sign in again). A request that comes while this process
+# is asking waits for the same answer; one in another process waits for the answer to be written (_settled).
+_asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under way
+
+
+def _recheck(key: str, user_id: str, started: float) -> bool:
+    with pool.connection() as conn:
+        claimed = conn.execute(
+            "UPDATE sessions SET checked_at = 'infinity' WHERE token_hash = %s AND expires_at > now()"
+            " AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'"
+            " AND checked_at IS DISTINCT FROM '-infinity'",
+            (key,),
+        ).rowcount
+    if not claimed:
+        return _settled(key)  # another request or process is asking, or just answered
+    status: int | None = None
+    try:
+        # The status is the answer: the body is never read, so a slow one can't hold the session's requests.
+        with httpx.stream(
+            "GET",
+            f"{AUTH_URL}/users/{user_id}",
+            headers={"authorization": f"Bearer {AUTH_TOKEN}", "x-agc-session-start": str(int(started * 1000))},
+            timeout=5,
+            follow_redirects=False,
+        ) as r:
+            status = r.status_code
+    except httpx.HTTPError as e:
+        log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
+    if status is None or status >= 500 or 200 <= status < 300:
+        if status is not None and status >= 500:
+            log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
+        with pool.connection() as conn:  # the next ask is 5 minutes on
+            conn.execute("UPDATE sessions SET checked_at = now() WHERE token_hash = %s", (key,))
+        return True
+    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
+    # marked refused; if that fails too, the claim's 'infinity' stays, which lets no one in either.
+    log.info("session ended: agent.cloud no longer lets this person in", user=user_id, status=status)
+    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET checked_at = '-infinity' WHERE token_hash = %s"):
+        try:
+            with pool.connection() as conn:
+                conn.execute(sql, (key,))
+            return False
+        except psycopg.Error as e:
+            log.error("session refused, and this didn't end it in the database", user=user_id, sql=sql.split()[0], code=e.sqlstate)
+    return False  # left as claimed, which lets no one in
+
+
+def _settled(key: str) -> bool:
+    """Another process's recheck of this session: let in once it writes an answer that keeps the session; refused if the
+    session is gone or refused, or if no answer is written within 6 seconds (its ask times out in 5)."""
+    until = time.monotonic() + 6
+    while True:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT checked_at = 'infinity' AS asking, checked_at = '-infinity' AS refused"
+                " FROM sessions WHERE token_hash = %s AND expires_at > now()",
+                (key,),
+            ).fetchone()
+        if not row or row["refused"]:
+            return False
+        if not row["asking"]:
+            return True
+        if time.monotonic() >= until:
+            return False
+        time.sleep(0.25)
+
+
+def _still_let_in(key: str, user_id: str, started: float) -> bool:
+    mine: Future[bool] = Future()
+    pending = _asking.setdefault(key, mine)
+    if pending is not mine:
+        return pending.result()
+    try:
+        verdict = _recheck(key, user_id, started)
+        mine.set_result(verdict)
+        return verdict
+    except BaseException as e:
+        mine.set_exception(e)
+        raise
+    finally:
+        _asking.pop(key, None)
+
+
 def current_user(request: Request) -> dict[str, Any] | None:
     if EDGE:
         return _edge_user(request)
     token = request.cookies.get(SESSION)
     if not token:
         return None
+    key = _hash(token)
     with pool.connection() as conn:
-        return conn.execute(
-            "SELECT u.id::text AS id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id"
-            " WHERE s.token_hash = %s AND s.expires_at > now()",
-            (_hash(token),),
+        row = conn.execute(
+            "SELECT u.id::text AS id, u.email, u.name, s.expires_at,"
+            " s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
+            " FROM sessions s JOIN users u ON u.id = s.user_id"
+            " WHERE s.token_hash = %s AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'",
+            (key,),
         ).fetchone()
+    if not row:
+        return None
+    due, started = row.pop("due"), row.pop("expires_at").timestamp() - DAY  # a session began a day before it expires
+    if (due or key in _asking) and not _still_let_in(key, row["id"], started):
+        return None
+    return row
 
 
 def signed_in(request: Request) -> dict[str, Any]:
