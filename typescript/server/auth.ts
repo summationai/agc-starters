@@ -67,9 +67,11 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
 const asking = new Map<string, Promise<boolean>>(); // session token hash → the recheck under way
 
 async function recheck(key: string, userId: string, started: number): Promise<boolean> {
-  const claimed = await pool.query(
-    `UPDATE sessions SET checked_at = now() WHERE token_hash = $1 AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'`, [key]);
-  if (!claimed.rowCount) return true; // another process just asked
+  const { rows: [claim] } = await pool.query<{ claimed: boolean }>(
+    `UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' THEN now() ELSE checked_at END
+     WHERE token_hash = $1 RETURNING checked_at = now() AS claimed`, [key]);
+  if (!claim) return false; // another request's recheck ended it meanwhile
+  if (!claim.claimed) return true; // another process just asked
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
       signal: AbortSignal.timeout(5_000),

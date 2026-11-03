@@ -89,12 +89,15 @@ _asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under
 
 def _recheck(key: str, user_id: str, started: float) -> bool:
     with pool.connection() as conn:
-        claimed = conn.execute(
-            "UPDATE sessions SET checked_at = now() WHERE token_hash = %s"
-            " AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'",
+        claim = conn.execute(
+            "UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day')"
+            " <= now() - interval '5 minutes' THEN now() ELSE checked_at END"
+            " WHERE token_hash = %s RETURNING checked_at = now() AS claimed",
             (key,),
-        ).rowcount
-    if not claimed:
+        ).fetchone()
+    if not claim:
+        return False  # another request's recheck ended it meanwhile
+    if not claim["claimed"]:
         return True  # another process just asked
     try:
         r = httpx.get(
