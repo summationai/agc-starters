@@ -192,6 +192,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const text = read(s, 'AGENTS.md');
     if (text.includes('# agent.cloud: how to work on this app')) return fail('AGENTS.md carries agc\u2019s own section; agc init appends it');
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
+    if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-4)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
