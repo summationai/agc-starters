@@ -2,7 +2,8 @@
 //   GET  /auth/sign-in    a fresh state in a short cookie, then off to $AGC_AUTH_URL/authorize
 //   GET  /auth/callback   check state FIRST, then trade the code (once, within a minute) for the person
 //   POST /auth/sign-out   end this session
-// Sessions are rows in the database (only a hash of the token is stored) and last a day.
+// Sessions are rows in the database (only a hash of the token is stored) and last a day. Each is rechecked with agent.cloud
+// at most once every 5 minutes (SPEC.md AUTH-8).
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import type { Context, Hono, MiddlewareHandler } from 'hono';
 import { deleteCookie, getCookie, setCookie } from 'hono/cookie';
@@ -56,6 +57,31 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
   return { id, email, name };
 }
 
+// AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
+// session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
+// cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
+// since an outage of agent.cloud must never sign everyone out, and the attempt counts, so it's asked again in 5 minutes.
+const RECHECK_MS = 5 * 60_000;
+const checked = new Map<string, number>(); // session token hash → when this process last asked about it (ms)
+async function stillLetIn(key: string, userId: string, started: number): Promise<boolean> {
+  const now = Date.now();
+  if (now - (checked.get(key) ?? started) < RECHECK_MS) return true;
+  if (checked.size >= 10_000) checked.clear(); // forgetting only means asking again
+  checked.set(key, now);
+  try {
+    const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
+      signal: AbortSignal.timeout(5_000),
+      headers: { authorization: `Bearer ${AGC_AUTH_TOKEN}`, 'x-agc-session-start': String(started) },
+    });
+    await res.body?.cancel();
+    if (res.status === 404) return false;
+    if (!res.ok) log.warn('session recheck unanswered, keeping the session', { user: userId, status: res.status });
+  } catch (e) {
+    log.warn('session recheck unanswered, keeping the session', { user: userId, error: (e as Error).name });
+  }
+  return true;
+}
+
 // Who's signed in, for every request: their session cookie, if it's live.
 export const session: MiddlewareHandler<Env> = async (c, next) => {
   if (EDGE) {
@@ -65,9 +91,16 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
   const token = getCookie(c, SESSION);
   c.set('user', null);
   if (token) {
-    const { rows } = await pool.query<User>(
-      'SELECT u.id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()', [hash(token)]);
-    c.set('user', rows[0] ?? null);
+    const key = hash(token);
+    const { rows } = await pool.query<User & { expires_at: Date }>(
+      'SELECT u.id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()', [key]);
+    const row = rows[0];
+    // A session began a day before it expires (the callback makes each one last a day).
+    if (row && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000))) {
+      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key]);
+      checked.delete(key);
+      log.info('session ended: agent.cloud no longer lets this person in', { user: row.id });
+    } else if (row) c.set('user', { id: row.id, email: row.email, name: row.name });
   }
   await next();
 };
@@ -113,7 +146,10 @@ export function signIn(app: Hono<Env>) {
   app.post('/auth/sign-out', async (c: Context<Env>) => {
     if (EDGE) return c.json({ ok: true }); // AUTH-5: signing out is the target's sign-in's, not this app's
     const token = getCookie(c, SESSION);
-    if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
+    if (token) {
+      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
+      checked.delete(hash(token));
+    }
     deleteCookie(c, SESSION, { path: '/', secure: !onMirror });
     return c.json({ ok: true });
   });

@@ -2,12 +2,14 @@
   GET  /auth/sign-in    a fresh state (and ?return_to, a path here) in short cookies, then off to $AGC_AUTH_URL/authorize
   GET  /auth/callback   check state FIRST, then trade the code (once, within a minute) for the person, and go back
   POST /auth/sign-out   end this session
-Sessions are rows in the database (only a hash of the token is stored) and last a day."""
+Sessions are rows in the database (only a hash of the token is stored) and last a day. Each is rechecked with agent.cloud
+at most once every 5 minutes (SPEC.md AUTH-8)."""
 
 import hashlib
 import os
 import re
 import secrets
+import time
 from typing import Any
 
 import httpx
@@ -75,18 +77,60 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
     return {"id": user_id, "email": email, "name": name}
 
 
+# AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
+# session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
+# cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
+# since an outage of agent.cloud must never sign everyone out, and the attempt counts, so it's asked again in 5 minutes.
+RECHECK_SECONDS = 300
+_checked: dict[str, float] = {}  # session token hash -> when this process last asked about it (seconds)
+
+
+def _still_let_in(key: str, user_id: str, started: float) -> bool:
+    now = time.time()
+    if now - _checked.get(key, started) < RECHECK_SECONDS:
+        return True
+    if len(_checked) >= 10_000:
+        _checked.clear()  # forgetting only means asking again
+    _checked[key] = now
+    try:
+        r = httpx.get(
+            f"{AUTH_URL}/users/{user_id}",
+            headers={"authorization": f"Bearer {AUTH_TOKEN}", "x-agc-session-start": str(int(started * 1000))},
+            timeout=5,
+        )
+    except httpx.HTTPError as e:
+        log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
+        return True
+    if r.status_code == 404:
+        return False
+    if not r.is_success:
+        log.warn("session recheck unanswered, keeping the session", user=user_id, status=r.status_code)
+    return True
+
+
 def current_user(request: Request) -> dict[str, Any] | None:
     if EDGE:
         return _edge_user(request)
     token = request.cookies.get(SESSION)
     if not token:
         return None
+    key = _hash(token)
     with pool.connection() as conn:
-        return conn.execute(
-            "SELECT u.id::text AS id, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id"
+        row = conn.execute(
+            "SELECT u.id::text AS id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id"
             " WHERE s.token_hash = %s AND s.expires_at > now()",
-            (_hash(token),),
+            (key,),
         ).fetchone()
+    if not row:
+        return None
+    # A session began a day before it expires (the callback makes each one last a day).
+    if not _still_let_in(key, row["id"], row.pop("expires_at").timestamp() - DAY):
+        with pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = %s", (key,))
+        _checked.pop(key, None)
+        log.info("session ended: agent.cloud no longer lets this person in", user=row["id"])
+        return None
+    return row
 
 
 def signed_in(request: Request) -> dict[str, Any]:
@@ -150,6 +194,7 @@ def sign_out(request: Request) -> Response:
     if token:
         with pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_hash(token),))
+        _checked.pop(_hash(token), None)
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
     return response

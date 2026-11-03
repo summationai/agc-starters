@@ -8,6 +8,8 @@
 //   GET  /auth/test/<t>/codes/<code>              Bearer → { traded }: how the state probe tells
 //   POST /email/v1/messages                       {to, subject, text, key} + Bearer AGC_EMAIL_TOKEN; each key once
 //   GET  /_fake/mail                              what was sent, for the suite (not part of agent.cloud)
+//   GET  /_fake/rechecks                          each GET users/<uuid>: its id and x-agc-session-start (the same)
+//   POST /_fake/users/<uuid>                      {status}: what GET users/<uuid> answers from now on (the same)
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -25,6 +27,8 @@ const KEY = /^[A-Za-z0-9._:/-]{1,200}$/;
 
 type User = { id: string; email: string | null; name: null; method: 'test'; test: true };
 const codes = new Map<string, { user: User; expires: number; used: boolean }>(); // by the code's hash
+const rechecks: { id: string; session_start: string | null; at: number }[] = [];
+const answers = new Map<string, number>(); // user id → the status its recheck answers, when the suite set one
 const mail = new Map<string, { key: string; to: string; subject: string; text: string; attempts: number; first_at: string }>();
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -83,6 +87,11 @@ const server = createServer(async (req, res) => {
     }
     if (auth && auth[2] && req.method === 'GET') {
       if (!bearer(req, AUTH_TOKEN)) return error(res, 401, 'auth.token', 'That isn’t this app’s sign-in token.');
+      const start = req.headers['x-agc-session-start'];
+      rechecks.push({ id: auth[2], session_start: typeof start === 'string' ? start : null, at: Date.now() });
+      const answer = answers.get(auth[2]);
+      if (answer === 404) return error(res, 404, 'auth.no_user', 'No one with that id can sign in to this app.');
+      if (answer) return error(res, answer, 'fake.unavailable', 'The fake platform was told to fail this recheck.');
       return UUID.test(auth[2]) ? json(res, 200, { user: { id: auth[2], email: null, name: null, method: 'test', test: true } }) : error(res, 404, 'auth.no_user', 'That isn’t a user id.');
     }
     if (auth && auth[3] && req.method === 'GET') {
@@ -107,6 +116,12 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { id: hash(b.key).slice(0, 16), status: 'captured' });
     }
     if (url.pathname === '/_fake/mail' && req.method === 'GET') return json(res, 200, { messages: [...mail.values()] });
+    if (url.pathname === '/_fake/rechecks' && req.method === 'GET') return json(res, 200, { rechecks });
+    const answering = /^\/_fake\/users\/([^/]+)$/.exec(url.pathname);
+    if (answering && UUID.test(answering[1]!) && req.method === 'POST') {
+      answers.set(answering[1]!, Number((await body(req)).status));
+      return json(res, 200, { ok: true });
+    }
     if (url.pathname === '/_fake/health') return json(res, 200, { ok: true });
     return error(res, 404, 'not_found', 'No such route on the fake platform.');
   } catch (e) {

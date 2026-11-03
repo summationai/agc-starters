@@ -25,6 +25,7 @@ export const CONF_TESTS = [
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
+  'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-unreachable',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -192,6 +193,67 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         : loose.length ? `not __Host- cookies (prefix, Secure, Path=/, no Domain): ${[...new Set(loose.map((c) => c.name))].join(', ')}` : `${new Set(lines.map((c) => c.name)).size} cookies, all __Host-`));
       const prodCookie = (cookiesOk ? pass : fail)(s ? `session cookie ${s.name}: HttpOnly ${s.httpOnly}, SameSite ${s.sameSite || 'unset'}, Secure ${s.secure}, lasts ${s.lifetime ?? 'the browser session'} s` : 'the callback set no session cookie');
       out.set('CONF:cookies', { ...prodCookie, perRule: { 'DEV-6': skip('dev mode not run') } });
+    }
+
+    // AUTH-8: each session is rechecked with agent.cloud at most once every 5 minutes, sending when it began. Time moves by
+    // moving a session's expiry back: each lasts a day from its sign-in, so its start moves with it.
+    {
+      const person = async (what: string) => {
+        const jar: Jar = new Map();
+        await signIn(env, web, jar, `${what}-${tag()}@example.test`);
+        const me = await req(env, web, jar, 'GET', '/api/me');
+        return { jar, id: String((me.json as { user?: { id?: string } } | null)?.user?.id ?? '') };
+      };
+      const age = (id: string, minutes: number) => env.sql('UPDATE sessions SET expires_at = expires_at - make_interval(mins => $2::int) WHERE user_id = $1', [id, minutes]);
+      const heard = async (id: string) => (await env.rechecks()).filter((r) => r.id === id);
+      const me = async (p: { jar: Jar }) => (await req(env, web, p.jar, 'GET', '/api/me')).status;
+
+      {
+        const p = await person('recheck');
+        const fresh = await me(p);
+        const n0 = (await heard(p.id)).length;
+        await age(p.id, 4);
+        const four = await me(p);
+        const n1 = (await heard(p.id)).length;
+        await age(p.id, 2);
+        const six = await me(p);
+        const n2 = (await heard(p.id)).length;
+        const again = await me(p);
+        const got = await heard(p.id);
+        const [row] = await env.sql<{ ms: string }>("SELECT (extract(epoch FROM expires_at - interval '1 day') * 1000)::bigint AS ms FROM sessions WHERE user_id = $1", [p.id]);
+        const sent = got[0]?.session_start ?? null;
+        const startOk = sent !== null && row !== undefined && Math.abs(Number(sent) - Number(row.ms)) <= 1;
+        const ok = UUID.test(p.id) && [fresh, four, six, again].every((s) => s === 200) && n0 === 0 && n1 === 0 && n2 === 1 && got.length === 1 && startOk;
+        set('CONF:recheck-interval', (ok ? pass : fail)(`rechecks heard: a new session ${n0}, at 4 minutes ${n1}, at 6 minutes ${n2}, right after ${got.length}; /api/me ${[fresh, four, six, again].join(', ')}; x-agc-session-start ${sent ?? 'not sent'}${startOk ? ', when the session began' : `, the session began at ${row?.ms ?? 'unknown'}`}`));
+      }
+      {
+        const p = await person('recheck-404');
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, 404);
+        const ended = await me(p);
+        const after = await me(p);
+        const [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+        const ok = UUID.test(p.id) && ended === 401 && after === 401 && n === 0 && (await heard(p.id)).length === 1;
+        set('CONF:recheck-404', (ok ? pass : fail)(`after a 404: /api/me ${ended}, then ${after}; ${n} sessions left; ${(await heard(p.id)).length} rechecks heard`));
+      }
+      {
+        const p = await person('recheck-5xx');
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, 503);
+        const kept = await me(p);
+        const again = await me(p);
+        const asked = (await heard(p.id)).length;
+        const q = await person('recheck-down');
+        await age(q.id, 6);
+        await env.pausePlatform();
+        const t0 = Date.now();
+        const down = await me(q).catch(() => 0);
+        const waited = Date.now() - t0;
+        await env.unpausePlatform();
+        const up = await me(q);
+        const ok = kept === 200 && again === 200 && asked === 1 && down === 200 && up === 200 && waited < 10_000;
+        set('CONF:recheck-unreachable', (ok ? pass : fail)(`a 503: /api/me ${kept}, then ${again} with ${asked} recheck; agent.cloud not answering: /api/me ${down || 'no answer'} after ${(waited / 1000).toFixed(1)} s, then ${up} once it's back`));
+      }
     }
 
     // AUTH-2: the platform's own state probe.

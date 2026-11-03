@@ -238,6 +238,15 @@ export class Env {
   async start(c: Container) { await this.docker(['start', c.name]); }
   async pauseDb() { await this.docker(['pause', `db-${this.id}`]); }
   async unpauseDb() { await this.docker(['unpause', `db-${this.id}`]); }
+  async pausePlatform() { await this.docker(['pause', `platform-${this.id}`]); }
+  async unpausePlatform() { await this.docker(['unpause', `platform-${this.id}`]); }
+  // AUTH-8: the sessions' rechecks the fake platform heard, and what it answers one user's from now on.
+  async rechecks(): Promise<{ id: string; session_start: string | null; at: number }[]> {
+    return ((await (await fetch(`${this.platformBase()}/_fake/rechecks`)).json()) as { rechecks: { id: string; session_start: string | null; at: number }[] }).rechecks;
+  }
+  async answerRechecks(id: string, status: number) {
+    await fetch(`${this.platformBase()}/_fake/users/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status }) });
+  }
   async inNetwork(cmd: string[]): Promise<{ code: number; out: string }> {
     const r = await run('docker', ['exec', `platform-${this.id}`, ...cmd], { timeoutMs: 30_000 });
     return { code: r.code, out: `${r.stdout}${r.stderr}` };
