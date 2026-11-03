@@ -192,7 +192,11 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const text = read(s, 'AGENTS.md');
     if (text.includes('# agent.cloud: how to work on this app')) return fail('AGENTS.md carries agc\u2019s own section; agc init appends it');
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
-    if (!text.includes('Admin routes answer only an admin')) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-4)');
+    // DOC-4: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
+    const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
+    if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-4)');
+    const unnamed = ['/admin', '/internal', '/debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
+    if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-4)`);
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
