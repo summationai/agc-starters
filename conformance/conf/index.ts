@@ -220,21 +220,31 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         const n2 = (await heard(p.id)).length;
         const again = await me(p);
         const got = await heard(p.id);
+        // 5 minutes after that recheck, by moving the session's record of it back (checked_at, the starters' own column).
+        await env.sql("UPDATE sessions SET checked_at = checked_at - interval '6 minutes' WHERE user_id = $1", [p.id]);
+        const later = await me(p);
+        const n4 = (await heard(p.id)).length;
         const [row] = await env.sql<{ ms: string }>("SELECT (extract(epoch FROM expires_at - interval '1 day') * 1000)::bigint AS ms FROM sessions WHERE user_id = $1", [p.id]);
         const sent = got[0]?.session_start ?? null;
         const startOk = sent !== null && row !== undefined && Math.abs(Number(sent) - Number(row.ms)) <= 1;
-        const ok = UUID.test(p.id) && [fresh, four, six, again].every((s) => s === 200) && n0 === 0 && n1 === 0 && n2 === 1 && got.length === 1 && startOk;
-        set('CONF:recheck-interval', (ok ? pass : fail)(`rechecks heard: a new session ${n0}, at 4 minutes ${n1}, at 6 minutes ${n2}, right after ${got.length}; /api/me ${[fresh, four, six, again].join(', ')}; x-agc-session-start ${sent ?? 'not sent'}${startOk ? ', when the session began' : `, the session began at ${row?.ms ?? 'unknown'}`}`));
+        const ok = UUID.test(p.id) && [fresh, four, six, again, later].every((s) => s === 200) && n0 === 0 && n1 === 0 && n2 === 1 && got.length === 1 && n4 === 2 && startOk;
+        set('CONF:recheck-interval', (ok ? pass : fail)(`rechecks heard: a new session ${n0}, at 4 minutes ${n1}, at 6 minutes ${n2}, right after ${got.length}, 6 minutes after that ${n4}; /api/me ${[fresh, four, six, again, later].join(', ')}; x-agc-session-start ${sent ?? 'not sent'}${startOk ? ', when the session began' : `, the session began at ${row?.ms ?? 'unknown'}`}`));
       }
       {
         const p = await person('recheck-404');
         await age(p.id, 6);
         await env.answerRechecks(p.id, 404);
-        const ended = await me(p);
+        // Two requests at once, the answer held back a second: the one that comes while the recheck is under way waits for it.
+        await env.pausePlatform();
+        const both = Promise.all([me(p), sleep(200).then(() => me(p))]);
+        await sleep(1000);
+        await env.unpausePlatform();
+        const [ended, alongside] = await both;
         const after = await me(p);
         const [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
-        const ok = UUID.test(p.id) && ended === 401 && after === 401 && n === 0 && (await heard(p.id)).length === 1;
-        set('CONF:recheck-404', (ok ? pass : fail)(`after a 404: /api/me ${ended}, then ${after}; ${n} sessions left; ${(await heard(p.id)).length} rechecks heard`));
+        const asked = (await heard(p.id)).length;
+        const ok = UUID.test(p.id) && ended === 401 && alongside === 401 && after === 401 && n === 0 && asked === 1;
+        set('CONF:recheck-404', (ok ? pass : fail)(`after a 404: /api/me ${ended}, one alongside it ${alongside}, then ${after}; ${n} sessions left; ${asked} rechecks heard`));
       }
       {
         const p = await person('recheck-5xx');

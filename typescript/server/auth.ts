@@ -60,26 +60,41 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
 // AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
 // session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
 // cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
-// since an outage of agent.cloud must never sign everyone out, and the attempt counts, so it's asked again in 5 minutes.
-const RECHECK_MS = 5 * 60_000;
-const checked = new Map<string, number>(); // session token hash → when this process last asked about it (ms)
-async function stillLetIn(key: string, userId: string, started: number): Promise<boolean> {
-  const now = Date.now();
-  if (now - (checked.get(key) ?? started) < RECHECK_MS) return true;
-  if (checked.size >= 10_000) checked.clear(); // forgetting only means asking again
-  checked.set(key, now);
+// since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
+// The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
+// conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
+// this process is asking waits for the same answer.
+const asking = new Map<string, Promise<boolean>>(); // session token hash → the recheck under way
+
+async function recheck(key: string, userId: string, started: number): Promise<boolean> {
+  const claimed = await pool.query(
+    `UPDATE sessions SET checked_at = now() WHERE token_hash = $1 AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'`, [key]);
+  if (!claimed.rowCount) return true; // another process just asked
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
       signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${AGC_AUTH_TOKEN}`, 'x-agc-session-start': String(started) },
     });
     await res.body?.cancel();
-    if (res.status === 404) return false;
+    if (res.status === 404) { // ended before anyone waiting hears it, so no request after this one finds the session
+      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key]);
+      log.info('session ended: agent.cloud no longer lets this person in', { user: userId });
+      return false;
+    }
     if (!res.ok) log.warn('session recheck unanswered, keeping the session', { user: userId, status: res.status });
   } catch (e) {
     log.warn('session recheck unanswered, keeping the session', { user: userId, error: (e as Error).name });
   }
   return true;
+}
+
+function stillLetIn(key: string, userId: string, started: number): Promise<boolean> {
+  let pending = asking.get(key);
+  if (!pending) {
+    pending = recheck(key, userId, started).finally(() => asking.delete(key));
+    asking.set(key, pending);
+  }
+  return pending;
 }
 
 // Who's signed in, for every request: their session cookie, if it's live.
@@ -92,15 +107,13 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
   c.set('user', null);
   if (token) {
     const key = hash(token);
-    const { rows } = await pool.query<User & { expires_at: Date }>(
-      'SELECT u.id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()', [key]);
+    const { rows } = await pool.query<User & { expires_at: Date; due: boolean }>(
+      `SELECT u.id, u.email, u.name, s.expires_at, coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due
+       FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()`, [key]);
     const row = rows[0];
     // A session began a day before it expires (the callback makes each one last a day).
-    if (row && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000))) {
-      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key]);
-      checked.delete(key);
-      log.info('session ended: agent.cloud no longer lets this person in', { user: row.id });
-    } else if (row) c.set('user', { id: row.id, email: row.email, name: row.name });
+    const ended = row && (row.due || asking.has(key)) && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000));
+    if (row && !ended) c.set('user', { id: row.id, email: row.email, name: row.name });
   }
   await next();
 };
@@ -146,10 +159,7 @@ export function signIn(app: Hono<Env>) {
   app.post('/auth/sign-out', async (c: Context<Env>) => {
     if (EDGE) return c.json({ ok: true }); // AUTH-5: signing out is the target's sign-in's, not this app's
     const token = getCookie(c, SESSION);
-    if (token) {
-      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
-      checked.delete(hash(token));
-    }
+    if (token) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [hash(token)]);
     deleteCookie(c, SESSION, { path: '/', secure: !onMirror });
     return c.json({ ok: true });
   });

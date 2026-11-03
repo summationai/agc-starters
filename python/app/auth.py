@@ -9,7 +9,7 @@ import hashlib
 import os
 import re
 import secrets
-import time
+from concurrent.futures import Future
 from typing import Any
 
 import httpx
@@ -80,18 +80,22 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
 # AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
 # session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
 # cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
-# since an outage of agent.cloud must never sign everyone out, and the attempt counts, so it's asked again in 5 minutes.
-RECHECK_SECONDS = 300
-_checked: dict[str, float] = {}  # session token hash -> when this process last asked about it (seconds)
+# since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
+# The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
+# conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
+# this process is asking waits for the same answer.
+_asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under way
 
 
-def _still_let_in(key: str, user_id: str, started: float) -> bool:
-    now = time.time()
-    if now - _checked.get(key, started) < RECHECK_SECONDS:
-        return True
-    if len(_checked) >= 10_000:
-        _checked.clear()  # forgetting only means asking again
-    _checked[key] = now
+def _recheck(key: str, user_id: str, started: float) -> bool:
+    with pool.connection() as conn:
+        claimed = conn.execute(
+            "UPDATE sessions SET checked_at = now() WHERE token_hash = %s"
+            " AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'",
+            (key,),
+        ).rowcount
+    if not claimed:
+        return True  # another process just asked
     try:
         r = httpx.get(
             f"{AUTH_URL}/users/{user_id}",
@@ -101,11 +105,30 @@ def _still_let_in(key: str, user_id: str, started: float) -> bool:
     except httpx.HTTPError as e:
         log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
         return True
-    if r.status_code == 404:
+    if r.status_code == 404:  # ended before anyone waiting hears it, so no request after this one finds the session
+        with pool.connection() as conn:
+            conn.execute("DELETE FROM sessions WHERE token_hash = %s", (key,))
+        log.info("session ended: agent.cloud no longer lets this person in", user=user_id)
         return False
     if not r.is_success:
         log.warn("session recheck unanswered, keeping the session", user=user_id, status=r.status_code)
     return True
+
+
+def _still_let_in(key: str, user_id: str, started: float) -> bool:
+    mine: Future[bool] = Future()
+    pending = _asking.setdefault(key, mine)
+    if pending is not mine:
+        return pending.result()
+    try:
+        verdict = _recheck(key, user_id, started)
+        mine.set_result(verdict)
+        return verdict
+    except BaseException as e:
+        mine.set_exception(e)
+        raise
+    finally:
+        _asking.pop(key, None)
 
 
 def current_user(request: Request) -> dict[str, Any] | None:
@@ -117,18 +140,15 @@ def current_user(request: Request) -> dict[str, Any] | None:
     key = _hash(token)
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT u.id::text AS id, u.email, u.name, s.expires_at FROM sessions s JOIN users u ON u.id = s.user_id"
-            " WHERE s.token_hash = %s AND s.expires_at > now()",
+            "SELECT u.id::text AS id, u.email, u.name, s.expires_at,"
+            " coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
+            " FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = %s AND s.expires_at > now()",
             (key,),
         ).fetchone()
     if not row:
         return None
-    # A session began a day before it expires (the callback makes each one last a day).
-    if not _still_let_in(key, row["id"], row.pop("expires_at").timestamp() - DAY):
-        with pool.connection() as conn:
-            conn.execute("DELETE FROM sessions WHERE token_hash = %s", (key,))
-        _checked.pop(key, None)
-        log.info("session ended: agent.cloud no longer lets this person in", user=row["id"])
+    due, started = row.pop("due"), row.pop("expires_at").timestamp() - DAY  # a session began a day before it expires
+    if (due or key in _asking) and not _still_let_in(key, row["id"], started):
         return None
     return row
 
@@ -194,7 +214,6 @@ def sign_out(request: Request) -> Response:
     if token:
         with pool.connection() as conn:
             conn.execute("DELETE FROM sessions WHERE token_hash = %s", (_hash(token),))
-        _checked.pop(_hash(token), None)
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION, path="/", secure=not ON_MIRROR, httponly=True, samesite="lax")
     return response
