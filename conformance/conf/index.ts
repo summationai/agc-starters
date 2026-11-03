@@ -262,24 +262,37 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       set('CONF:recheck-401', await refused('recheck-401', 401));
       set('CONF:recheck-redirect', await refused('recheck-302', 302));
       {
-        // The app can't delete the session (a trigger refuses every delete of sessions while this runs): it's still ended.
-        const p = await person('recheck-nodelete');
-        await age(p.id, 6);
-        await env.answerRechecks(p.id, 404);
-        await env.sql(`CREATE FUNCTION conf_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'conformance: no deletes'; END $$;
-          CREATE TRIGGER conf_no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION conf_no_delete()`);
-        let ended = 0, after = 0, n = -1;
+        // Triggers stand in for an app role without those rights. A: the app can't delete the session, so it's left due and
+        // each request after it asks again. B: it can't empty checked_at either, so only the claim's 10 seconds hold it off.
+        const a = await person('recheck-nodelete');
+        const b = await person('recheck-nowrite');
+        for (const p of [a, b]) { await age(p.id, 6); await env.answerRechecks(p.id, 404); }
+        await env.sql(`CREATE FUNCTION conf_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'conformance: refused'; END $$;
+          CREATE TRIGGER conf_no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION conf_refuse()`);
+        const r: Record<string, number> = {};
         try {
-          ended = await me(p);
-          after = await me(p);
-          [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+          r.aEnded = await me(a);
+          r.aAfter = await me(a);
+          r.aAsked = (await heard(a.id)).length;
+          [{ n: r.aRows }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [a.id]);
+          await env.sql(`CREATE TRIGGER conf_no_due BEFORE UPDATE ON sessions FOR EACH ROW WHEN (NEW.checked_at IS NULL) EXECUTE FUNCTION conf_refuse()`);
+          r.bEnded = await me(b);
+          const [due] = await env.sql<{ s: number }>("SELECT extract(epoch FROM checked_at + interval '5 minutes' - now())::float AS s FROM sessions WHERE user_id = $1", [b.id]);
+          r.bDueIn = due?.s ?? Number.NaN;
+          await env.sql("UPDATE sessions SET checked_at = checked_at - interval '10 seconds' WHERE user_id = $1", [b.id]); // 10 seconds on
+          r.bLater = await me(b);
+          r.bAsked = (await heard(b.id)).length;
         } finally {
-          await env.sql('DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_no_delete()');
+          await env.sql('DROP TRIGGER IF EXISTS conf_no_due ON sessions; DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_refuse()');
         }
-        const later = await me(p);
-        const asked = (await heard(p.id)).length;
-        const ok = UUID.test(p.id) && ended === 401 && after === 401 && later === 401 && n === 1 && asked === 1;
-        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`after a 404 with its delete refused: /api/me ${ended}, then ${after} (${n} session row kept), then ${later} once deletes work again; ${asked} rechecks heard`));
+        r.aLast = await me(a);
+        r.aAskedLast = (await heard(a.id)).length;
+        [{ n: r.aRowsLast }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [a.id]);
+        const ok = UUID.test(a.id) && UUID.test(b.id) && r.aEnded === 401 && r.aAfter === 401 && r.aAsked === 2 && r.aRows === 1
+          && r.bEnded === 401 && r.bDueIn! <= 10 && r.bDueIn! > 0 && r.bLater === 401 && r.bAsked === 2 && r.aLast === 401 && r.aAskedLast === 3 && r.aRowsLast === 0;
+        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`delete refused: /api/me ${r.aEnded}, then ${r.aAfter} with ${r.aAsked} rechecks heard and ${r.aRows} row kept; `
+          + `once deletes work, ${r.aLast} with ${r.aAskedLast} rechecks and ${r.aRowsLast} rows. Delete and emptying checked_at refused: /api/me ${r.bEnded}, `
+          + `due again in ${r.bDueIn?.toFixed(1)} s; 10 s on, ${r.bLater} with ${r.bAsked} rechecks heard`));
       }
       {
         const p = await person('recheck-5xx');

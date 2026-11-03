@@ -63,18 +63,21 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
 // since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
 // Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
 // a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
-// The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
-// conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
+// The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began). One
+// conditional update claims each recheck, so two requests or two processes never ask at once: the claim holds the session
+// off for 10 seconds only (LEASE), and only an answer that keeps the session moves checked_at to now. So if a refusal
+// can't be written, the session is due again within seconds instead of let in for 5 minutes. A request that comes while
 // this process is asking waits for the same answer.
 const asking = new Map<string, Promise<boolean>>(); // session token hash → the recheck under way
+const LEASE = "now() - interval '5 minutes' + interval '10 seconds'"; // a checked_at that makes the session due in 10 s
 
 async function recheck(key: string, userId: string, started: number): Promise<boolean> {
   const { rows: [claim] } = await pool.query<{ claimed: boolean }>(
-    `UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' THEN now() ELSE checked_at END
-     WHERE token_hash = $1 RETURNING checked_at = now() AS claimed`, [key]);
+    `UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' THEN ${LEASE} ELSE checked_at END
+     WHERE token_hash = $1 RETURNING checked_at = ${LEASE} AS claimed`, [key]);
   if (!claim) return false; // another request's recheck ended it meanwhile
-  if (!claim.claimed) return true; // another process just asked
-  let status: number;
+  if (!claim.claimed) return true; // another process is asking, or just asked
+  let status: number | null = null;
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
       redirect: 'manual', signal: AbortSignal.timeout(5_000),
@@ -84,19 +87,18 @@ async function recheck(key: string, userId: string, started: number): Promise<bo
     await res.body?.cancel().catch(() => {});
   } catch (e) {
     log.warn('session recheck unanswered, keeping the session', { user: userId, error: (e as Error).name });
+  }
+  if (status === null || status >= 500 || (status >= 200 && status < 300)) {
+    if (status !== null && status >= 500) log.warn('session recheck unanswered, keeping the session', { user: userId, status });
+    await pool.query('UPDATE sessions SET checked_at = now() WHERE token_hash = $1', [key]); // the next ask is 5 minutes on
     return true;
   }
-  if (status >= 200 && status < 300) return true;
-  if (status >= 500) {
-    log.warn('session recheck unanswered, keeping the session', { user: userId, status });
-    return true;
-  }
-  // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
-  // expired instead; this request is refused either way.
+  // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's left
+  // due (checked_at, which the claim just wrote, emptied), so the next request asks again; this one is refused either way.
   log.info('session ended: agent.cloud no longer lets this person in', { user: userId, status });
   await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key])
-    .catch(() => pool.query('UPDATE sessions SET expires_at = now() WHERE token_hash = $1', [key]))
-    .catch((e) => log.error('session refused but not ended in the database', { user: userId, code: (e as { code?: string }).code }));
+    .catch(() => pool.query('UPDATE sessions SET checked_at = NULL WHERE token_hash = $1', [key]))
+    .catch((e) => log.error('session refused, and left as claimed: due again within 10 s', { user: userId, code: (e as { code?: string }).code }));
   return false;
 }
 

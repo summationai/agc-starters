@@ -84,9 +84,11 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
 # since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
 # Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
 # a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
-# The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
-# conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
-# this process is asking waits for the same answer.
+# The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began). One
+# conditional update claims each recheck, so two requests or two processes never ask at once: the claim holds the session
+# off for 10 seconds only (a checked_at of now() - 5 minutes + 10 seconds), and only an answer that keeps the session
+# moves checked_at to now. So if a refusal can't be written, the session is due again within seconds instead of let in
+# for 5 minutes. A request that comes while this process is asking waits for the same answer.
 _asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under way
 
 
@@ -94,14 +96,15 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
     with pool.connection() as conn:
         claim = conn.execute(
             "UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day')"
-            " <= now() - interval '5 minutes' THEN now() ELSE checked_at END"
-            " WHERE token_hash = %s RETURNING checked_at = now() AS claimed",
+            " <= now() - interval '5 minutes' THEN now() - interval '5 minutes' + interval '10 seconds' ELSE checked_at END"
+            " WHERE token_hash = %s RETURNING checked_at = now() - interval '5 minutes' + interval '10 seconds' AS claimed",
             (key,),
         ).fetchone()
     if not claim:
         return False  # another request's recheck ended it meanwhile
     if not claim["claimed"]:
-        return True  # another process just asked
+        return True  # another process is asking, or just asked
+    status: int | None = None
     try:
         # The status is the answer: the body is never read, so a slow one can't hold the session's requests.
         with httpx.stream(
@@ -114,23 +117,23 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
             status = r.status_code
     except httpx.HTTPError as e:
         log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
+    if status is None or status >= 500 or 200 <= status < 300:
+        if status is not None and status >= 500:
+            log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
+        with pool.connection() as conn:  # the next ask is 5 minutes on
+            conn.execute("UPDATE sessions SET checked_at = now() WHERE token_hash = %s", (key,))
         return True
-    if 200 <= status < 300:
-        return True
-    if status >= 500:
-        log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
-        return True
-    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
-    # expired instead; this request is refused either way.
+    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's left
+    # due (checked_at, which the claim just wrote, emptied), so the next request asks again; this one is refused either way.
     log.info("session ended: agent.cloud no longer lets this person in", user=user_id, status=status)
-    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET expires_at = now() WHERE token_hash = %s"):
+    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET checked_at = NULL WHERE token_hash = %s"):
         try:
             with pool.connection() as conn:
                 conn.execute(sql, (key,))
             return False
         except psycopg.Error as e:
             log.error("session refused, and this didn't end it in the database", user=user_id, sql=sql.split()[0], code=e.sqlstate)
-    return False
+    return False  # left as claimed: due again within 10 s
 
 
 def _still_let_in(key: str, user_id: str, started: float) -> bool:

@@ -274,17 +274,20 @@ def test_auth_1_callback_goes_back_to_the_kept_path(monkeypatch: pytest.MonkeyPa
     assert _set_cookies(r)["__Host-auth_return"]["max-age"] == "0"  # deleted with the state
 
 
-CLAIM, DELETE, EXPIRE = "UPDATE sessions SET checked_at", "DELETE FROM sessions WHERE", "UPDATE sessions SET expires_at"
+CLAIM = "UPDATE sessions SET checked_at = CASE"
+CHECKED = "UPDATE sessions SET checked_at = now()"
+DELETE = "DELETE FROM sessions WHERE token_hash ="
+DUE = "UPDATE sessions SET checked_at = NULL"
 
 
 def _pool(monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None, failing: tuple[str, ...] = ()) -> list[str]:
     """AUTH-8: a pool whose recheck claim finds `claim` (None: the session is gone), recording each statement by its first
-    four words; a statement in `failing` fails the way a database refusing it does."""
+    six words; a statement in `failing` fails the way a database refusing it does."""
     ran: list[str] = []
 
     class Conn:
         def execute(self, sql: str, *_: object) -> SimpleNamespace:
-            ran.append(" ".join(sql.split()[:4]))
+            ran.append(" ".join(sql.split()[:6]))
             if ran[-1] in failing:
                 raise psycopg.errors.InsufficientPrivilege("permission denied for table sessions")
             return SimpleNamespace(fetchone=lambda: claim)
@@ -363,7 +366,7 @@ def test_auth_8_a_2xx_or_5xx_keeps_the_session_and_every_other_answer_ends_it(
     assert sent["headers"] == {"authorization": "Bearer agca_test", "x-agc-session-start": "1700000000500"}
     assert sent["follow_redirects"] is False  # a redirect is the answer, never followed
     assert read == []  # only the status: a slow body can't hold the session's requests
-    assert ran == ([CLAIM] if kept else [CLAIM, DELETE])
+    assert ran == ([CLAIM, CHECKED] if kept else [CLAIM, DELETE])
 
 
 def test_auth_8_the_answer_detector_sees_a_body_read() -> None:
@@ -381,16 +384,18 @@ def test_auth_8_unreachable_agent_cloud_keeps_the_session(monkeypatch: pytest.Mo
     ran = _pool(monkeypatch, {"claimed": True})
     asked, _ = _control(monkeypatch, httpx.ConnectTimeout("no answer"))
     assert auth._still_let_in("due", "u1", 0.0) is True
-    assert len(asked) == 1 and ran == [CLAIM]
+    assert len(asked) == 1 and ran == [CLAIM, CHECKED]
 
 
-@pytest.mark.parametrize("failing", [(DELETE,), (DELETE, EXPIRE)])
-def test_auth_8_a_refused_session_is_ended_even_when_it_cant_be_deleted(monkeypatch: pytest.MonkeyPatch, failing: tuple[str, ...]) -> None:
-    # Expired instead, so the next request doesn't find it; and refused even when that fails too.
+@pytest.mark.parametrize("failing", [(DELETE,), (DELETE, DUE)])
+def test_auth_8_a_refused_session_is_refused_even_when_it_cant_be_deleted(
+    monkeypatch: pytest.MonkeyPatch, failing: tuple[str, ...]
+) -> None:
+    # Left due instead, so the next request asks again; and refused even when that fails too. Never marked checked.
     ran = _pool(monkeypatch, {"claimed": True}, failing)
     _control(monkeypatch, 404)
     assert auth._still_let_in("due", "u1", 0.0) is False
-    assert ran == [CLAIM, DELETE, EXPIRE]
+    assert ran == [CLAIM, DELETE, DUE]
 
 
 def test_auth_8_the_apps_own_database_failing_is_never_agent_cloud_not_answering(monkeypatch: pytest.MonkeyPatch) -> None:
