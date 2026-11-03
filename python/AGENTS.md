@@ -13,6 +13,8 @@ uv run pyright             type-check
 uv add <package>           a new dependency (commit uv.lock with it)
 ```
 
+Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, holding storage, and agent.cloud's review files a copy made over a week ago (`idle-copy`).
+
 ## Where things are
 
 ```text

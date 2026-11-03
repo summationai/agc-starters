@@ -12,6 +12,8 @@ npm test             the server's own tests (server/*.test.ts); agent.cloud's ch
 npm run build        the UI into web/dist (agent.cloud runs this when it builds the image)
 ```
 
+Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, holding storage, and agent.cloud's review files a copy made over a week ago (`idle-copy`).
+
 ## Where things are
 
 ```text
