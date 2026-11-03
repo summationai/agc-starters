@@ -2,6 +2,7 @@
 // the source with the mirror's environment; then a server file, a UI file and a worker file are edited (each edit is
 // made inside the container, as an editor on the laptop would) and each change must land within 5 s, with no restart.
 import { copyFileSync, mkdirSync } from 'node:fs';
+import { connect } from 'node:net';
 import { dirname, join } from 'node:path';
 import { type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, type TestResult } from '../lib/report.ts';
@@ -134,6 +135,17 @@ async function reloadHttp(env: Env, web: Container, r: Reload | undefined): Prom
   const before = await req(env, web, jar, 'GET', r.url);
   if (before.text.includes(r.expect)) return fail(`${r.url} already contains "${r.expect}" before the edit`);
   const body = async () => (await req(env, web, new Map(), 'GET', r.url!)).text;
+  // DEV-2: a connection held open through both saves, as a browser preconnects one: a dev server that waits on it before
+  // it restarts doesn't change in time (agc-starters' TypeScript dev.ts waited a minute on one).
+  const held = connect(web.port!, '127.0.0.1').on('error', () => {});
+  try {
+    return await timedReload(web, r, body);
+  } finally {
+    held.destroy();
+  }
+}
+
+async function timedReload(web: Container, r: Reload, body: () => Promise<string>): Promise<TestResult> {
   // A warm-up save, untimed (a first compile can be slow on a cold runner); then the timed one puts the file back.
   await edit(web, r.file, r.find, r.replace);
   const warm = await until(60_000, async () => ((await body()).includes(r.expect) ? true : undefined), 250);
