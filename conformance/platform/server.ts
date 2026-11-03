@@ -9,7 +9,8 @@
 //   POST /email/v1/messages                       {to, subject, text, key} + Bearer AGC_EMAIL_TOKEN; each key once
 //   GET  /_fake/mail                              what was sent, for the suite (not part of agent.cloud)
 //   GET  /_fake/rechecks                          each GET users/<uuid>: its id and x-agc-session-start (the same)
-//   POST /_fake/users/<uuid>                      {status}: what GET users/<uuid> answers from now on (the same)
+//   POST /_fake/users/<uuid>                      {status}: what GET users/<uuid> answers from now on (the same); a 3xx
+//                                                 redirects to GET /_fake/redirected/<uuid>, a 200 also heard as a recheck
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -91,6 +92,8 @@ const server = createServer(async (req, res) => {
       rechecks.push({ id: auth[2], session_start: typeof start === 'string' ? start : null, at: Date.now() });
       const answer = answers.get(auth[2]);
       if (answer === 404) return error(res, 404, 'auth.no_user', 'No one with that id can sign in to this app.');
+      // A redirect to a place that would let the person in, and that counts as a recheck heard, so following it shows.
+      if (answer && answer >= 300 && answer < 400) { res.writeHead(answer, { location: `/_fake/redirected/${auth[2]}` }); return res.end(); }
       if (answer) return error(res, answer, 'fake.unavailable', 'The fake platform was told to fail this recheck.');
       return UUID.test(auth[2]) ? json(res, 200, { user: { id: auth[2], email: null, name: null, method: 'test', test: true } }) : error(res, 404, 'auth.no_user', 'That isn’t a user id.');
     }
@@ -117,6 +120,11 @@ const server = createServer(async (req, res) => {
     }
     if (url.pathname === '/_fake/mail' && req.method === 'GET') return json(res, 200, { messages: [...mail.values()] });
     if (url.pathname === '/_fake/rechecks' && req.method === 'GET') return json(res, 200, { rechecks });
+    const redirected = /^\/_fake\/redirected\/([^/]+)$/.exec(url.pathname);
+    if (redirected && UUID.test(redirected[1]!) && req.method === 'GET') {
+      rechecks.push({ id: redirected[1]!, session_start: null, at: Date.now() });
+      return json(res, 200, { user: { id: redirected[1]!, email: null, name: null, method: 'test', test: true } });
+    }
     const answering = /^\/_fake\/users\/([^/]+)$/.exec(url.pathname);
     if (answering && UUID.test(answering[1]!) && req.method === 'POST') {
       answers.set(answering[1]!, Number((await body(req)).status));

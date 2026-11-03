@@ -25,7 +25,7 @@ export const CONF_TESTS = [
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
-  'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-unreachable',
+  'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -245,6 +245,41 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         const asked = (await heard(p.id)).length;
         const ok = UUID.test(p.id) && ended === 401 && alongside === 401 && after === 401 && n === 0 && asked === 1;
         set('CONF:recheck-404', (ok ? pass : fail)(`after a 404: /api/me ${ended}, one alongside it ${alongside}, then ${after}; ${n} sessions left; ${asked} rechecks heard`));
+      }
+      // Any other answer that isn't a 2xx or a 5xx ends it too. A redirect leads to a place that would let the person in
+      // and counts as a recheck heard, so following it shows as two.
+      const refused = async (what: string, status: number) => {
+        const p = await person(what);
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, status);
+        const ended = await me(p);
+        const after = await me(p);
+        const [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+        const asked = (await heard(p.id)).length;
+        const ok = UUID.test(p.id) && ended === 401 && after === 401 && n === 0 && asked === 1;
+        return (ok ? pass : fail)(`after a ${status}: /api/me ${ended}, then ${after}; ${n} sessions left; ${asked} rechecks heard`);
+      };
+      set('CONF:recheck-401', await refused('recheck-401', 401));
+      set('CONF:recheck-redirect', await refused('recheck-302', 302));
+      {
+        // The app can't delete the session (a trigger refuses every delete of sessions while this runs): it's still ended.
+        const p = await person('recheck-nodelete');
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, 404);
+        await env.sql(`CREATE FUNCTION conf_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'conformance: no deletes'; END $$;
+          CREATE TRIGGER conf_no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION conf_no_delete()`);
+        let ended = 0, after = 0, n = -1;
+        try {
+          ended = await me(p);
+          after = await me(p);
+          [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+        } finally {
+          await env.sql('DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_no_delete()');
+        }
+        const later = await me(p);
+        const asked = (await heard(p.id)).length;
+        const ok = UUID.test(p.id) && ended === 401 && after === 401 && later === 401 && n === 1 && asked === 1;
+        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`after a 404 with its delete refused: /api/me ${ended}, then ${after} (${n} session row kept), then ${later} once deletes work again; ${asked} rechecks heard`));
       }
       {
         const p = await person('recheck-5xx');

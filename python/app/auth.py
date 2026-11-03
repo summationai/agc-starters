@@ -13,6 +13,7 @@ from concurrent.futures import Future
 from typing import Any
 
 import httpx
+import psycopg
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse, Response
 
@@ -79,8 +80,10 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
 
 # AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
 # session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
-# cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
+# cutoff stays refused even after they sign in again. A 2xx keeps it. A timeout, a 5xx or a network error keeps it too,
 # since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
+# Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
+# a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
 # The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
 # conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
 # this process is asking waits for the same answer.
@@ -106,19 +109,28 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
             f"{AUTH_URL}/users/{user_id}",
             headers={"authorization": f"Bearer {AUTH_TOKEN}", "x-agc-session-start": str(int(started * 1000))},
             timeout=5,
+            follow_redirects=False,
         ) as r:
             status = r.status_code
     except httpx.HTTPError as e:
         log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
         return True
-    if status == 404:  # ended before anyone waiting hears it, so no request after this one finds the session
-        with pool.connection() as conn:
-            conn.execute("DELETE FROM sessions WHERE token_hash = %s", (key,))
-        log.info("session ended: agent.cloud no longer lets this person in", user=user_id)
-        return False
-    if not 200 <= status < 300:
+    if 200 <= status < 300:
+        return True
+    if status >= 500:
         log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
-    return True
+        return True
+    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
+    # expired instead; this request is refused either way.
+    log.info("session ended: agent.cloud no longer lets this person in", user=user_id, status=status)
+    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET expires_at = now() WHERE token_hash = %s"):
+        try:
+            with pool.connection() as conn:
+                conn.execute(sql, (key,))
+            return False
+        except psycopg.Error as e:
+            log.error("session refused, and this didn't end it in the database", user=user_id, sql=sql.split()[0], code=e.sqlstate)
+    return False
 
 
 def _still_let_in(key: str, user_id: str, started: float) -> bool:

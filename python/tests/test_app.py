@@ -8,12 +8,13 @@ import re
 import socket
 import time
 import tomllib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http.cookies import SimpleCookie
 from types import SimpleNamespace
 
 import httpx
+import psycopg
 import pytest
 
 os.environ.setdefault("DATABASE_URL", "postgresql://test@localhost/test")
@@ -273,13 +274,19 @@ def test_auth_1_callback_goes_back_to_the_kept_path(monkeypatch: pytest.MonkeyPa
     assert _set_cookies(r)["__Host-auth_return"]["max-age"] == "0"  # deleted with the state
 
 
-def _claiming(monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None) -> list[str]:
-    """AUTH-8: a pool whose recheck claim finds `claim` (None: the session is gone), recording each statement."""
+CLAIM, DELETE, EXPIRE = "UPDATE sessions SET checked_at", "DELETE FROM sessions WHERE", "UPDATE sessions SET expires_at"
+
+
+def _pool(monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None, failing: tuple[str, ...] = ()) -> list[str]:
+    """AUTH-8: a pool whose recheck claim finds `claim` (None: the session is gone), recording each statement by its first
+    four words; a statement in `failing` fails the way a database refusing it does."""
     ran: list[str] = []
 
     class Conn:
         def execute(self, sql: str, *_: object) -> SimpleNamespace:
-            ran.append(sql.split()[0])
+            ran.append(" ".join(sql.split()[:4]))
+            if ran[-1] in failing:
+                raise psycopg.errors.InsufficientPrivilege("permission denied for table sessions")
             return SimpleNamespace(fetchone=lambda: claim)
 
     @contextmanager
@@ -290,43 +297,105 @@ def _claiming(monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None) ->
     return ran
 
 
-def test_auth_8_a_session_another_recheck_ended_meanwhile_is_not_let_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    _claiming(monkeypatch, None)
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=lambda *_, **__: pytest.fail("asked agent.cloud")))
-    assert auth._still_let_in("gone", "u1", 0.0) is False
+class _Answer:
+    """agent.cloud's answer to a recheck. Every attribute but its status is recorded in `read` when the app reaches for it."""
+
+    def __init__(self, status: int, read: list[str]) -> None:
+        self.status_code, self._read = status, read
+
+    def __getattr__(self, name: str) -> Callable[..., bytes]:
+        self._read.append(name)
+        return lambda *_, **__: b""
 
 
-def test_auth_8_a_recheck_another_process_just_made_is_not_made_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    _claiming(monkeypatch, {"claimed": False})
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=lambda *_, **__: pytest.fail("asked agent.cloud")))
-    assert auth._still_let_in("asked", "u1", 0.0) is True
-
-
-@pytest.mark.parametrize(("status", "kept"), [(200, True), (503, True), (404, False)])
-def test_auth_8_only_a_404_ends_the_session_and_it_sends_the_start(monkeypatch: pytest.MonkeyPatch, status: int, kept: bool) -> None:
-    ran = _claiming(monkeypatch, {"claimed": True})
-    sent: dict[str, str] = {}
-
-    def never_read(*_: object) -> None:
-        pytest.fail("read the body")
+def _control(monkeypatch: pytest.MonkeyPatch, answer: int | Exception) -> tuple[list[dict[str, object]], list[str]]:
+    """AUTH-8: agent.cloud answering each recheck with `answer` (a status, or an error raised). Returns each request asked
+    (its method, url and keyword arguments) and each part of an answer read besides its status."""
+    asked: list[dict[str, object]] = []
+    read: list[str] = []
 
     @contextmanager
-    def stream(method: str, url: str, headers: dict[str, str], timeout: float) -> Iterator[SimpleNamespace]:
-        sent.update(headers, url=url, method=method)
-        yield SimpleNamespace(status_code=status, read=never_read, iter_bytes=never_read, text=None)  # the body is never read
+    def stream(method: str, url: str, **kwargs: object) -> Iterator[_Answer]:
+        asked.append({"method": method, "url": url, **kwargs})
+        if isinstance(answer, Exception):
+            raise answer
+        yield _Answer(answer, read)
 
     monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=stream, HTTPError=httpx.HTTPError))
+    return asked, read
+
+
+# The last case is the positive control: the same observation sees agent.cloud asked when the claim is this request's.
+@pytest.mark.parametrize(("claim", "verdict", "asks"), [(None, False, 0), ({"claimed": False}, True, 0), ({"claimed": True}, True, 1)])
+def test_auth_8_only_the_request_that_claims_the_recheck_asks(
+    monkeypatch: pytest.MonkeyPatch, claim: dict[str, bool] | None, verdict: bool, asks: int
+) -> None:
+    _pool(monkeypatch, claim)
+    asked, _ = _control(monkeypatch, 200)
+    assert auth._still_let_in("key", "u1", 0.0) is verdict
+    assert len(asked) == asks
+
+
+@pytest.mark.parametrize(
+    ("status", "kept"),
+    [
+        (200, True),
+        (204, True),
+        (500, True),
+        (503, True),
+        (404, False),
+        (401, False),
+        (400, False),
+        (403, False),
+        (429, False),
+        (302, False),
+        (301, False),
+    ],
+)
+def test_auth_8_a_2xx_or_5xx_keeps_the_session_and_every_other_answer_ends_it(
+    monkeypatch: pytest.MonkeyPatch, status: int, kept: bool
+) -> None:
+    ran = _pool(monkeypatch, {"claimed": True})
+    asked, read = _control(monkeypatch, status)
     assert auth._still_let_in("due", "u1", 1700000000.5) is kept
-    assert sent["method"] == "GET"
-    assert sent["x-agc-session-start"] == "1700000000500" and sent["url"].endswith("/users/u1")
-    assert ran == (["UPDATE", "DELETE"] if status == 404 else ["UPDATE"])
+    [sent] = asked
+    assert sent["method"] == "GET" and str(sent["url"]).endswith("/users/u1")
+    assert sent["headers"] == {"authorization": "Bearer agca_test", "x-agc-session-start": "1700000000500"}
+    assert sent["follow_redirects"] is False  # a redirect is the answer, never followed
+    assert read == []  # only the status: a slow body can't hold the session's requests
+    assert ran == ([CLAIM] if kept else [CLAIM, DELETE])
+
+
+def test_auth_8_the_answer_detector_sees_a_body_read() -> None:
+    # Positive control for `read == []` above: reaching for the body, any way, is seen.
+    read: list[str] = []
+    answer = _Answer(200, read)
+    _ = answer.status_code
+    _ = answer.text
+    answer.read()
+    _ = answer.content
+    assert read == ["text", "read", "content"]
 
 
 def test_auth_8_unreachable_agent_cloud_keeps_the_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    _claiming(monkeypatch, {"claimed": True})
-
-    def get(*_: object, **__: object) -> None:
-        raise httpx.ConnectTimeout("no answer")
-
-    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=get, HTTPError=httpx.HTTPError))
+    ran = _pool(monkeypatch, {"claimed": True})
+    asked, _ = _control(monkeypatch, httpx.ConnectTimeout("no answer"))
     assert auth._still_let_in("due", "u1", 0.0) is True
+    assert len(asked) == 1 and ran == [CLAIM]
+
+
+@pytest.mark.parametrize("failing", [(DELETE,), (DELETE, EXPIRE)])
+def test_auth_8_a_refused_session_is_ended_even_when_it_cant_be_deleted(monkeypatch: pytest.MonkeyPatch, failing: tuple[str, ...]) -> None:
+    # Expired instead, so the next request doesn't find it; and refused even when that fails too.
+    ran = _pool(monkeypatch, {"claimed": True}, failing)
+    _control(monkeypatch, 404)
+    assert auth._still_let_in("due", "u1", 0.0) is False
+    assert ran == [CLAIM, DELETE, EXPIRE]
+
+
+def test_auth_8_the_apps_own_database_failing_is_never_agent_cloud_not_answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    _pool(monkeypatch, {"claimed": True}, (CLAIM,))
+    asked, _ = _control(monkeypatch, 200)
+    with pytest.raises(psycopg.Error):
+        auth._still_let_in("due", "u1", 0.0)
+    assert asked == []

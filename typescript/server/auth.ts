@@ -59,8 +59,10 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
 
 // AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
 // session began (x-agc-session-start), so agent.cloud judges this session and not just the person: one from before a
-// cutoff stays refused even after they sign in again. Only a 404 ends it. A timeout, a 5xx or a network error keeps it,
+// cutoff stays refused even after they sign in again. A 2xx keeps it. A timeout, a 5xx or a network error keeps it too,
 // since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
+// Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
+// a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
 // The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began), and one
 // conditional update claims each recheck, so two requests or two processes never ask twice. A request that comes while
 // this process is asking waits for the same answer.
@@ -72,22 +74,30 @@ async function recheck(key: string, userId: string, started: number): Promise<bo
      WHERE token_hash = $1 RETURNING checked_at = now() AS claimed`, [key]);
   if (!claim) return false; // another request's recheck ended it meanwhile
   if (!claim.claimed) return true; // another process just asked
+  let status: number;
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
-      signal: AbortSignal.timeout(5_000),
+      redirect: 'manual', signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${AGC_AUTH_TOKEN}`, 'x-agc-session-start': String(started) },
     });
-    await res.body?.cancel();
-    if (res.status === 404) { // ended before anyone waiting hears it, so no request after this one finds the session
-      await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key]);
-      log.info('session ended: agent.cloud no longer lets this person in', { user: userId });
-      return false;
-    }
-    if (!res.ok) log.warn('session recheck unanswered, keeping the session', { user: userId, status: res.status });
+    status = res.status;
+    await res.body?.cancel().catch(() => {});
   } catch (e) {
     log.warn('session recheck unanswered, keeping the session', { user: userId, error: (e as Error).name });
+    return true;
   }
-  return true;
+  if (status >= 200 && status < 300) return true;
+  if (status >= 500) {
+    log.warn('session recheck unanswered, keeping the session', { user: userId, status });
+    return true;
+  }
+  // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
+  // expired instead; this request is refused either way.
+  log.info('session ended: agent.cloud no longer lets this person in', { user: userId, status });
+  await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key])
+    .catch(() => pool.query('UPDATE sessions SET expires_at = now() WHERE token_hash = $1', [key]))
+    .catch((e) => log.error('session refused but not ended in the database', { user: userId, code: (e as { code?: string }).code }));
+  return false;
 }
 
 function stillLetIn(key: string, userId: string, started: number): Promise<boolean> {
