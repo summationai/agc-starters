@@ -9,6 +9,7 @@ import hashlib
 import os
 import re
 import secrets
+import time
 from concurrent.futures import Future
 from typing import Any
 
@@ -84,26 +85,24 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
 # since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
 # Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
 # a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
-# The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began). One
-# conditional update claims each recheck, so two requests or two processes never ask at once: the claim holds the session
-# off for 10 seconds only (a checked_at of now() - 5 minutes + 10 seconds), and only an answer that keeps the session
-# moves checked_at to now. So if a refusal can't be written, the session is due again within seconds instead of let in
-# for 5 minutes. A request that comes while this process is asking waits for the same answer.
+# The session row's checked_at says where it stands: when agent.cloud last kept it (never, for a new one, counts as when
+# it began); 'infinity' while a recheck is under way; '-infinity' once refused, if it couldn't be deleted. A recheck is
+# claimed by setting 'infinity', so the session lets no one in until an answer that keeps it is written: a refusal, or an
+# answer this app fails to write, leaves it refused for good (they sign in again). A request that comes while this process
+# is asking waits for the same answer; one in another process waits for the answer to be written (_settled).
 _asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under way
 
 
 def _recheck(key: str, user_id: str, started: float) -> bool:
     with pool.connection() as conn:
-        claim = conn.execute(
-            "UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day')"
-            " <= now() - interval '5 minutes' THEN now() - interval '5 minutes' + interval '10 seconds' ELSE checked_at END"
-            " WHERE token_hash = %s RETURNING checked_at = now() - interval '5 minutes' + interval '10 seconds' AS claimed",
+        claimed = conn.execute(
+            "UPDATE sessions SET checked_at = 'infinity' WHERE token_hash = %s AND expires_at > now()"
+            " AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes'"
+            " AND checked_at IS DISTINCT FROM '-infinity'",
             (key,),
-        ).fetchone()
-    if not claim:
-        return False  # another request's recheck ended it meanwhile
-    if not claim["claimed"]:
-        return True  # another process is asking, or just asked
+        ).rowcount
+    if not claimed:
+        return _settled(key)  # another request or process is asking, or just answered
     status: int | None = None
     try:
         # The status is the answer: the body is never read, so a slow one can't hold the session's requests.
@@ -123,17 +122,37 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
         with pool.connection() as conn:  # the next ask is 5 minutes on
             conn.execute("UPDATE sessions SET checked_at = now() WHERE token_hash = %s", (key,))
         return True
-    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's left
-    # due (checked_at, which the claim just wrote, emptied), so the next request asks again; this one is refused either way.
+    # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
+    # marked refused; if that fails too, the claim's 'infinity' stays, which lets no one in either.
     log.info("session ended: agent.cloud no longer lets this person in", user=user_id, status=status)
-    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET checked_at = NULL WHERE token_hash = %s"):
+    for sql in ("DELETE FROM sessions WHERE token_hash = %s", "UPDATE sessions SET checked_at = '-infinity' WHERE token_hash = %s"):
         try:
             with pool.connection() as conn:
                 conn.execute(sql, (key,))
             return False
         except psycopg.Error as e:
             log.error("session refused, and this didn't end it in the database", user=user_id, sql=sql.split()[0], code=e.sqlstate)
-    return False  # left as claimed: due again within 10 s
+    return False  # left as claimed, which lets no one in
+
+
+def _settled(key: str) -> bool:
+    """Another process's recheck of this session: let in once it writes an answer that keeps the session; refused if the
+    session is gone or refused, or if no answer is written within 6 seconds (its ask times out in 5)."""
+    until = time.monotonic() + 6
+    while True:
+        with pool.connection() as conn:
+            row = conn.execute(
+                "SELECT checked_at = 'infinity' AS asking, checked_at = '-infinity' AS refused"
+                " FROM sessions WHERE token_hash = %s AND expires_at > now()",
+                (key,),
+            ).fetchone()
+        if not row or row["refused"]:
+            return False
+        if not row["asking"]:
+            return True
+        if time.monotonic() >= until:
+            return False
+        time.sleep(0.25)
 
 
 def _still_let_in(key: str, user_id: str, started: float) -> bool:
@@ -162,8 +181,9 @@ def current_user(request: Request) -> dict[str, Any] | None:
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT u.id::text AS id, u.email, u.name, s.expires_at,"
-            " coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
-            " FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = %s AND s.expires_at > now()",
+            " s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
+            " FROM sessions s JOIN users u ON u.id = s.user_id"
+            " WHERE s.token_hash = %s AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'",
             (key,),
         ).fetchone()
     if not row:

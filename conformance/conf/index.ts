@@ -262,37 +262,54 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       set('CONF:recheck-401', await refused('recheck-401', 401));
       set('CONF:recheck-redirect', await refused('recheck-302', 302));
       {
-        // Triggers stand in for an app role without those rights. A: the app can't delete the session, so it's left due and
-        // each request after it asks again. B: it can't empty checked_at either, so only the claim's 10 seconds hold it off.
+        // Triggers stand in for an app role without those rights. A: the app can't delete the session; B: nor mark it refused.
+        // Either way it stays refused, even once agent.cloud is down (a 503 would keep a live session) and time moves on.
+        // C: another process's recheck under way (its claim, written here): a request waits for its answer.
         const a = await person('recheck-nodelete');
         const b = await person('recheck-nowrite');
-        for (const p of [a, b]) { await age(p.id, 6); await env.answerRechecks(p.id, 404); }
+        const c = await person('recheck-elsewhere');
+        for (const p of [a, b, c]) await age(p.id, 6);
+        for (const p of [a, b]) await env.answerRechecks(p.id, 404);
+        const state = async (id: string) => String((await env.sql<{ s: string }>('SELECT checked_at::text AS s FROM sessions WHERE user_id = $1', [id]))[0]?.s ?? 'gone');
         await env.sql(`CREATE FUNCTION conf_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'conformance: refused'; END $$;
           CREATE TRIGGER conf_no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION conf_refuse()`);
-        const r: Record<string, number> = {};
+        const r: Record<string, number | string> = {};
         try {
           r.aEnded = await me(a);
+          await env.answerRechecks(a.id, 503);
           r.aAfter = await me(a);
-          r.aAsked = (await heard(a.id)).length;
-          [{ n: r.aRows }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [a.id]);
-          await env.sql(`CREATE TRIGGER conf_no_due BEFORE UPDATE ON sessions FOR EACH ROW WHEN (NEW.checked_at IS NULL) EXECUTE FUNCTION conf_refuse()`);
+          await env.sql(`CREATE TRIGGER conf_no_mark BEFORE UPDATE ON sessions FOR EACH ROW WHEN (NEW.checked_at = '-infinity') EXECUTE FUNCTION conf_refuse()`);
           r.bEnded = await me(b);
-          const [due] = await env.sql<{ s: number }>("SELECT extract(epoch FROM checked_at + interval '5 minutes' - now())::float AS s FROM sessions WHERE user_id = $1", [b.id]);
-          r.bDueIn = due?.s ?? Number.NaN;
-          await env.sql("UPDATE sessions SET checked_at = checked_at - interval '10 seconds' WHERE user_id = $1", [b.id]); // 10 seconds on
-          r.bLater = await me(b);
-          r.bAsked = (await heard(b.id)).length;
+          await env.answerRechecks(b.id, 503);
+          const t0 = Date.now();
+          r.bAfter = await me(b);
+          r.bWaited = (Date.now() - t0) / 1000;
         } finally {
-          await env.sql('DROP TRIGGER IF EXISTS conf_no_due ON sessions; DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_refuse()');
+          await env.sql('DROP TRIGGER IF EXISTS conf_no_mark ON sessions; DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_refuse()');
         }
-        r.aLast = await me(a);
-        r.aAskedLast = (await heard(a.id)).length;
-        [{ n: r.aRowsLast }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [a.id]);
-        const ok = UUID.test(a.id) && UUID.test(b.id) && r.aEnded === 401 && r.aAfter === 401 && r.aAsked === 2 && r.aRows === 1
-          && r.bEnded === 401 && r.bDueIn! <= 10 && r.bDueIn! > 0 && r.bLater === 401 && r.bAsked === 2 && r.aLast === 401 && r.aAskedLast === 3 && r.aRowsLast === 0;
-        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`delete refused: /api/me ${r.aEnded}, then ${r.aAfter} with ${r.aAsked} rechecks heard and ${r.aRows} row kept; `
-          + `once deletes work, ${r.aLast} with ${r.aAskedLast} rechecks and ${r.aRowsLast} rows. Delete and emptying checked_at refused: /api/me ${r.bEnded}, `
-          + `due again in ${r.bDueIn?.toFixed(1)} s; 10 s on, ${r.bLater} with ${r.bAsked} rechecks heard`));
+        await env.sql("UPDATE sessions SET expires_at = expires_at - interval '6 minutes' WHERE user_id = ANY($1::uuid[])", [[a.id, b.id]]);
+        r.aLater = await me(a);
+        r.bLater = await me(b);
+        r.aState = await state(a.id);
+        r.bState = await state(b.id);
+        r.aAsked = (await heard(a.id)).length;
+        r.bAsked = (await heard(b.id)).length;
+        await env.sql("UPDATE sessions SET checked_at = 'infinity' WHERE user_id = $1", [c.id]);
+        const t1 = Date.now();
+        const waiting = me(c);
+        await sleep(1000);
+        await env.sql('UPDATE sessions SET checked_at = now() WHERE user_id = $1', [c.id]);
+        r.cIn = await waiting;
+        r.cWaited = (Date.now() - t1) / 1000;
+        r.cAsked = (await heard(c.id)).length;
+        const ok = UUID.test(a.id) && UUID.test(b.id) && UUID.test(c.id)
+          && r.aEnded === 401 && r.aAfter === 401 && r.aLater === 401 && r.aState === '-infinity' && r.aAsked === 1
+          && r.bEnded === 401 && r.bAfter === 401 && r.bLater === 401 && r.bState === 'infinity' && r.bAsked === 1
+          && r.cIn === 200 && (r.cWaited as number) >= 1 && r.cAsked === 0;
+        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`delete refused: /api/me ${r.aEnded}, then with agent.cloud answering 503 ${r.aAfter}, later ${r.aLater}; `
+          + `checked_at ${r.aState}, ${r.aAsked} rechecks heard. Delete and marking refused both refused: /api/me ${r.bEnded}, then ${r.bAfter} after `
+          + `${(r.bWaited as number).toFixed(1)} s, later ${r.bLater}; checked_at ${r.bState}, ${r.bAsked} rechecks heard. A recheck under way elsewhere: `
+          + `/api/me ${r.cIn} once its answer was written, after ${(r.cWaited as number).toFixed(1)} s, ${r.cAsked} rechecks heard`));
       }
       {
         const p = await person('recheck-5xx');

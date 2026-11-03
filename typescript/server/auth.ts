@@ -63,20 +63,18 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
 // since an outage of agent.cloud must never sign everyone out; the attempt still counts, so it's asked again in 5 minutes.
 // Every other answer ends it: a 404, a 401 (a bad or stale AGC_AUTH_TOKEN must not keep sessions forever), a 400, a 403,
 // a 429, and a redirect, which is never followed. A failure of this app's own database is never agent.cloud not answering.
-// The session row says when it was last asked about (checked_at; never, for a new one, counts as when it began). One
-// conditional update claims each recheck, so two requests or two processes never ask at once: the claim holds the session
-// off for 10 seconds only (LEASE), and only an answer that keeps the session moves checked_at to now. So if a refusal
-// can't be written, the session is due again within seconds instead of let in for 5 minutes. A request that comes while
-// this process is asking waits for the same answer.
+// The session row's checked_at says where it stands: when agent.cloud last kept it (never, for a new one, counts as when
+// it began); 'infinity' while a recheck is under way; '-infinity' once refused, if it couldn't be deleted. A recheck is
+// claimed by setting 'infinity', so the session lets no one in until an answer that keeps it is written: a refusal, or an
+// answer this app fails to write, leaves it refused for good (they sign in again). A request that comes while this process
+// is asking waits for the same answer; one in another process waits for the answer to be written (settled).
 const asking = new Map<string, Promise<boolean>>(); // session token hash → the recheck under way
-const LEASE = "now() - interval '5 minutes' + interval '10 seconds'"; // a checked_at that makes the session due in 10 s
 
 async function recheck(key: string, userId: string, started: number): Promise<boolean> {
-  const { rows: [claim] } = await pool.query<{ claimed: boolean }>(
-    `UPDATE sessions SET checked_at = CASE WHEN coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' THEN ${LEASE} ELSE checked_at END
-     WHERE token_hash = $1 RETURNING checked_at = ${LEASE} AS claimed`, [key]);
-  if (!claim) return false; // another request's recheck ended it meanwhile
-  if (!claim.claimed) return true; // another process is asking, or just asked
+  const { rowCount } = await pool.query(
+    `UPDATE sessions SET checked_at = 'infinity' WHERE token_hash = $1 AND expires_at > now()
+       AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' AND checked_at IS DISTINCT FROM '-infinity'`, [key]);
+  if (!rowCount) return settled(key); // another request or process is asking, or just answered
   let status: number | null = null;
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
@@ -93,13 +91,26 @@ async function recheck(key: string, userId: string, started: number): Promise<bo
     await pool.query('UPDATE sessions SET checked_at = now() WHERE token_hash = $1', [key]); // the next ask is 5 minutes on
     return true;
   }
-  // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's left
-  // due (checked_at, which the claim just wrote, emptied), so the next request asks again; this one is refused either way.
+  // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
+  // marked refused; if that fails too, the claim's 'infinity' stays, which lets no one in either.
   log.info('session ended: agent.cloud no longer lets this person in', { user: userId, status });
   await pool.query('DELETE FROM sessions WHERE token_hash = $1', [key])
-    .catch(() => pool.query('UPDATE sessions SET checked_at = NULL WHERE token_hash = $1', [key]))
-    .catch((e) => log.error('session refused, and left as claimed: due again within 10 s', { user: userId, code: (e as { code?: string }).code }));
+    .catch(() => pool.query("UPDATE sessions SET checked_at = '-infinity' WHERE token_hash = $1", [key]))
+    .catch((e) => log.error('session refused, and left as claimed', { user: userId, code: (e as { code?: string }).code }));
   return false;
+}
+
+// Another process's recheck of this session: let in once it writes an answer that keeps the session; refused if the
+// session is gone or refused, or if no answer is written within 6 seconds (its ask times out in 5).
+async function settled(key: string): Promise<boolean> {
+  for (const until = Date.now() + 6_000; ;) {
+    const { rows: [row] } = await pool.query<{ asking: boolean; refused: boolean }>(
+      `SELECT checked_at = 'infinity' AS asking, checked_at = '-infinity' AS refused FROM sessions WHERE token_hash = $1 AND expires_at > now()`, [key]);
+    if (!row || row.refused) return false;
+    if (!row.asking) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((r) => setTimeout(r, 250));
+  }
 }
 
 function stillLetIn(key: string, userId: string, started: number): Promise<boolean> {
@@ -122,8 +133,10 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
   if (token) {
     const key = hash(token);
     const { rows } = await pool.query<User & { expires_at: Date; due: boolean }>(
-      `SELECT u.id, u.email, u.name, s.expires_at, coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due
-       FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = $1 AND s.expires_at > now()`, [key]);
+      `SELECT u.id, u.email, u.name, s.expires_at,
+         s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = $1 AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'`, [key]);
     const row = rows[0];
     // A session began a day before it expires (the callback makes each one last a day).
     const ended = row && (row.due || asking.has(key)) && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000));
