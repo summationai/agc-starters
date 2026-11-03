@@ -52,6 +52,9 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), '# agent.cloud: how to work on this app\n'))), 'fail');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*Business logic:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-3: no word on triggers');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- Every route answers[^\n]*\n/, '')))), 'fail', 'DOC-4: no word on slow routes');
+  for (const [cut, what] of [[/ rather than one per row/, 'a query per row'], [/, index what it filters and joins by/, 'an index'], [/, and put an outside call in a job rather than make the person wait on it/, 'outside calls']] as const) {
+    assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(cut, '')))), 'fail', `DOC-4: no word on ${what}`);
+  }
   assert.equal(outcome('LINT:descriptor', await broken((d) => writeFileSync(join(d, 'server', 'health.ts'), "export const a = { status: 'ok' }; export const b = { status: 'ok' };\n"))), 'fail', 'find occurs twice');
   assert.equal(outcome('LINT:fixed-values', await broken((d) => writeFileSync(join(d, 'migrations', '0002_status.sql'), 'CREATE TABLE tasks (id uuid PRIMARY KEY, status text NOT NULL);\n'))), 'fail');
   assert.equal(outcome('LINT:app-pages', await broken((d) => rmSync(join(d, 'web', 'src', 'Notes.tsx')))), 'fail', 'no Notes page');
