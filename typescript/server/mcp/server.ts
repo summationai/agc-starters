@@ -46,7 +46,9 @@ type LiveGrant = Grant & { user: { id: string; email: string | null; name: strin
 // one under way, and a call in another process waits for its answer to be written. A lease that passes with no answer was
 // abandoned (the process died or failed), so the waiting call claims it and asks itself: recovery is bounded by the lease.
 // Whichever path lets a call through, the call runs with the role the database holds after it, so the call that sees a
-// demotion already runs demoted.
+// demotion already runs demoted. Each claim carries its own token (asking_token), and every write the recheck makes (the
+// role, the settle, a revoke, the cleanup) is fenced on it: a process whose lease lapsed and was taken over writes nothing,
+// and its call goes by what the database holds now.
 const rechecking = new Map<string, Promise<boolean>>(); // grant id → the recheck (or the wait) under way in this process
 const POLL_MS = 100;
 
@@ -62,18 +64,23 @@ async function stillLetIn(g: LiveGrant): Promise<boolean> {
   return true;
 }
 
-async function claimAndRecheck(g: LiveGrant): Promise<boolean> {
+export async function claimAndRecheck(g: LiveGrant): Promise<boolean> {
   for (let tries = 0; tries < 3; tries++) {
-    const { rowCount } = await pool.query(`UPDATE mcp_grants SET asking_until = now() + interval '10 seconds'
-      WHERE id = $1 AND revoked_at IS NULL AND checked_at <= now() - interval '5 minutes' AND (asking_until IS NULL OR asking_until <= now())`, [g.id]);
-    if (rowCount) return recheck(g);
+    const token = randomUUID();
+    const { rowCount } = await pool.query(`UPDATE mcp_grants SET asking_until = now() + interval '10 seconds', asking_token = $2
+      WHERE id = $1 AND revoked_at IS NULL AND checked_at <= now() - interval '5 minutes' AND (asking_until IS NULL OR asking_until <= now())`, [g.id, token]);
+    if (rowCount) {
+      const outcome = await recheck(g, token);
+      if (outcome !== 'lost') return outcome === 'ok';
+      continue; // its lease lapsed and was taken over: its answer counts for nothing; go by what's there now
+    }
     const seen = await settled(g.id); // not due, or another process holds the lease
     if (seen !== 'abandoned') return seen === 'ok';
   }
   return false; // claimed and abandoned over and over: let no one in this time
 }
 
-async function recheck(g: LiveGrant): Promise<boolean> {
+async function recheck(g: LiveGrant, token: string): Promise<'ok' | 'revoked' | 'lost'> {
   try {
     const url = g.subject_iss === AGENT_CLOUD
       ? `${process.env.AGC_AUTH_URL}/users/${encodeURIComponent(g.user_id)}`
@@ -92,17 +99,20 @@ async function recheck(g: LiveGrant): Promise<boolean> {
     if (status === null || status >= 500 || (status >= 200 && status < 300)) {
       const who = status !== null && status < 300 && body && typeof body === 'object' ? ((body as { user?: unknown }).user ?? body) as { role?: unknown } : null;
       if (who && typeof who === 'object' && 'role' in who) {
-        await pool.query('UPDATE users SET role = $2 WHERE id = $1', [g.user_id, who.role === 'owner' || who.role === 'member' ? who.role : null]);
+        await pool.query('UPDATE users SET role = $2 WHERE id = $1 AND EXISTS (SELECT 1 FROM mcp_grants WHERE id = $3 AND asking_token = $4)',
+          [g.user_id, who.role === 'owner' || who.role === 'member' ? who.role : null, g.id, token]);
       }
-      await pool.query('UPDATE mcp_grants SET checked_at = now(), asking_until = NULL WHERE id = $1', [g.id]);
-      return true;
+      const { rowCount } = await pool.query('UPDATE mcp_grants SET checked_at = now(), asking_until = NULL, asking_token = NULL WHERE id = $1 AND asking_token = $2', [g.id, token]);
+      return rowCount ? 'ok' : 'lost';
     }
-    await pool.query('UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now(), asking_until = NULL WHERE id = $1', [g.id]);
+    const { rowCount } = await pool.query(`UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now(), asking_until = NULL, asking_token = NULL
+      WHERE id = $1 AND asking_token = $2`, [g.id, token]);
+    if (!rowCount) return 'lost';
     log.info('agent connection ended: agent.cloud no longer lets this person in', { user: g.user_id, status });
-    return false;
+    return 'revoked';
   } finally {
-    // Whatever happened, the lease goes, so a failed recheck never holds the grant: the next call asks again.
-    await pool.query('UPDATE mcp_grants SET asking_until = NULL WHERE id = $1 AND asking_until IS NOT NULL', [g.id])
+    // Whatever happened, this claim's lease goes (and only this claim's), so a failed recheck never holds the grant.
+    await pool.query('UPDATE mcp_grants SET asking_until = NULL, asking_token = NULL WHERE id = $1 AND asking_token = $2', [g.id, token])
       .catch((e) => log.warn('a recheck\u2019s lease couldn\u2019t be cleared; it runs out by itself', { grant: g.id, error: (e as Error).name }));
   }
 }

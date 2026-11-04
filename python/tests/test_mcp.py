@@ -615,6 +615,118 @@ def test_amcp_7_a_recheck_lease_is_bounded_abandoned_recovered_others_waited_for
         sql("DELETE FROM mcp_registrations")
 
 
+class _Held(http.server.BaseHTTPRequestHandler):
+    """agent.cloud's answers, each held until the test releases it with a role."""
+
+    waiting: list[tuple[threading.Event, list[str]]] = []
+
+    def do_GET(self) -> None:
+        released, role = threading.Event(), []
+        _Held.waiting.append((released, role))
+        released.wait(10)
+        raw = json.dumps({"user": {"id": self.path[7:], "role": role[0] if role else None}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+def _release(i: int, role: str) -> None:
+    released, holder = _Held.waiting[i]
+    holder.append(role)
+    released.set()
+
+
+def _until(n: int) -> None:
+    for _ in range(400):
+        if len(_Held.waiting) >= n:
+            break
+        time.sleep(0.025)
+    assert len(_Held.waiting) == n
+
+
+@needs_pg
+def test_amcp_6_7_a_recheck_whose_lease_lapsed_and_was_taken_over_writes_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.mcp import server as mcp_server
+    from app.mcp.oauth import grant_of
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Held)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AGC_AUTH_URL", f"http://127.0.0.1:{server.server_port}")
+    sql("DELETE FROM mcp_registrations")
+
+    def row(who: str) -> dict[str, Any]:
+        return sql(
+            "SELECT g.checked_at, g.asking_until, g.asking_token::text AS asking_token, u.role FROM mcp_grants g"
+            " JOIN users u ON u.id = g.user_id WHERE g.user_id = %s",
+            who,
+        )[0]
+
+    def live(who: str, bearer: str) -> dict[str, Any]:
+        g = grant_of(bearer, sql("SELECT resource FROM mcp_grants WHERE user_id = %s", who)[0]["resource"])
+        assert g
+        return g
+
+    try:
+        with ThreadPoolExecutor(4) as run:
+            # 1. Worker A claims and asks; its lease lapses; worker B takes over and asks. A's stale answer arrives while B
+            # holds the lease: A writes nothing, and its cleanup leaves B's lease alone. Then B's answer settles it.
+            _Held.waiting = []
+            p1 = "00000000-0000-4000-8000-0000000000d1"
+            t1 = connect(signed_in(p1, "owner"))["access_token"]
+            sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", p1)
+            a = run.submit(mcp_server._claim_and_recheck, live(p1, t1))
+            _until(1)
+            token_a = row(p1)["asking_token"]
+            sql("UPDATE mcp_grants SET asking_until = now() - interval '1 second' WHERE user_id = %s", p1)
+            b = run.submit(call, t1, "get_me")
+            _until(2)
+            token_b = row(p1)["asking_token"]
+            assert token_b != token_a  # B holds its own claim
+            _release(0, "owner")
+            time.sleep(0.3)
+            during = row(p1)
+            assert during["asking_token"] == token_b  # A's cleanup left B's lease alone
+            assert during["asking_until"] is not None  # and B's lease is still running
+            assert during["role"] == "owner"  # A's answer wrote nothing
+            _release(1, "member")
+            assert _role_of(b.result(10)) == "member"  # B's call runs as B's answer says
+            assert a.result(10) is True  # A's call goes by what's there now: let in, not by its own answer
+            after1 = row(p1)
+            assert [after1["role"], after1["asking_until"], after1["asking_token"]] == ["member", None, None]
+            # 2. B settles a demotion first; A resumes afterwards with its stale owner answer: the role stays member, B's
+            # settle stands, and the call A served runs as member.
+            _Held.waiting = []
+            p2 = "00000000-0000-4000-8000-0000000000d2"
+            t2 = connect(signed_in(p2, "owner"))["access_token"]
+            sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", p2)
+            a2 = run.submit(mcp_server._claim_and_recheck, live(p2, t2))
+            _until(1)
+            sql("UPDATE mcp_grants SET asking_until = now() - interval '1 second' WHERE user_id = %s", p2)
+            b2 = run.submit(call, t2, "get_me")
+            _until(2)
+            _release(1, "member")
+            assert _role_of(b2.result(10)) == "member"
+            settled_by_b = row(p2)["checked_at"]
+            _release(0, "owner")
+            assert a2.result(10) is True
+            after2 = row(p2)
+            assert after2["role"] == "member"  # A's stale owner answer never reached the role
+            assert after2["checked_at"] == settled_by_b  # B's settle stands
+            assert [after2["asking_until"], after2["asking_token"]] == [None, None]
+            assert _role_of(call(t2, "get_me")) == "member"  # the call A served runs as member
+            assert len(_Held.waiting) == 2  # nobody asked a third time
+    finally:
+        for released, _ in _Held.waiting:
+            released.set()
+        server.shutdown()
+        sql("DELETE FROM mcp_registrations")
+
+
 # Edge sign-in (AMCP-6, AMCP-7): the gate's signed x-agc-identity names a grant by its issuer and provider_id.
 from cryptography.hazmat.primitives import hashes  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402

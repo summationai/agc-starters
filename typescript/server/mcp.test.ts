@@ -20,7 +20,8 @@ const { pool } = await import('./db.ts');
 const { redirectOk, CALLBACKS } = await import('./mcp/oauth.ts');
 const { api } = await import('./mcp/index.ts');
 const { catalog } = await import('./mcp/tools.ts');
-const { holdsSecret, marked } = await import('./mcp/server.ts');
+const { holdsSecret, marked, claimAndRecheck } = await import('./mcp/server.ts');
+const { grantOf } = await import('./mcp/oauth.ts');
 after(async () => { await pool.end(); if (pg) spawnSync('dropdb', ['--if-exists', db]); });
 
 const skip = !pg && 'no local Postgres (createdb failed)';
@@ -336,6 +337,73 @@ test('AMCP-6, AMCP-7: the call that sees a demotion runs demoted; concurrent cal
     assert.ok(Date.now() - started >= 1_500, 'it waited for the other process first');
     assert.equal(asked, 1, 'then it asked itself');
     assert.equal((await pool.query('SELECT asking_until FROM mcp_grants WHERE user_id = $1', [stuck])).rows[0].asking_until, null);
+  } finally {
+    process.env.AGC_AUTH_URL = was;
+    fake.close();
+  }
+});
+
+test('AMCP-6, AMCP-7: a recheck whose lease lapsed and was taken over writes nothing: not the role, the settle, or the cleanup', { skip }, async () => {
+  const { createServer } = await import('node:http');
+  // agent.cloud's answers, each released by the test: the first (old worker A's) says owner, every later one member.
+  const held: { release: (role: string) => void }[] = [];
+  const fake = createServer((req, res) => {
+    held.push({ release: (role) => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { id: req.url!.slice(7), role } })) });
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
+  const was = process.env.AGC_AUTH_URL;
+  process.env.AGC_AUTH_URL = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
+  const until = async (n: number) => { for (let i = 0; held.length < n && i < 200; i++) await new Promise((r) => setTimeout(r, 25)); assert.equal(held.length, n); };
+  const row = async (who: string) => (await pool.query('SELECT g.checked_at, g.asking_until, g.asking_token, u.role FROM mcp_grants g JOIN users u ON u.id = g.user_id WHERE g.user_id = $1', [who])).rows[0];
+  const roleOf = (r: { content: { text: string }[] }) => (JSON.parse(r.content[0]!.text.split('\n')[1]!) as { user: { role: string | null } }).user.role;
+  const liveGrant = async (who: string, bearer: string) => (await grantOf(bearer, (await pool.query('SELECT resource FROM mcp_grants WHERE user_id = $1', [who])).rows[0].resource))!;
+  try {
+    // 1. Worker A claims and asks; its lease lapses; worker B takes over and asks. A's (stale) answer arrives while B holds
+    // the lease: A writes nothing, and its cleanup leaves B's lease alone. Then B's answer settles it.
+    const p1 = '00000000-0000-4000-8000-0000000000d1';
+    const { access_token: t1 } = await connect(await signedIn(p1, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [p1]);
+    const a = claimAndRecheck(await liveGrant(p1, t1) as never);
+    await until(1);
+    const tokenA = (await row(p1)).asking_token as string;
+    await pool.query("UPDATE mcp_grants SET asking_until = now() - interval '1 second' WHERE user_id = $1", [p1]);
+    const b = call(t1, 'get_me');
+    await until(2);
+    const tokenB = (await row(p1)).asking_token as string;
+    assert.notEqual(tokenB, tokenA, 'B holds its own claim');
+    held[0]!.release('owner');
+    await new Promise((r) => setTimeout(r, 300));
+    const during = await row(p1);
+    assert.equal(during.asking_token, tokenB, 'A’s cleanup left B’s lease alone');
+    assert.ok(during.asking_until, 'and B’s lease is still running');
+    assert.equal(during.role, 'owner', 'A’s answer wrote nothing');
+    held[1]!.release('member');
+    assert.equal(roleOf(await b), 'member', 'B’s call runs as B’s answer says');
+    assert.equal(await a, true, 'A’s call goes by what’s there now: let in, not by its own answer');
+    const after1 = await row(p1);
+    assert.deepEqual([after1.role, after1.asking_until, after1.asking_token], ['member', null, null]);
+    // 2. B settles a demotion first; A resumes afterwards with its stale owner answer: the role stays member, B's settle stands,
+    // and the call A served runs as member.
+    held.length = 0;
+    const p2 = '00000000-0000-4000-8000-0000000000d2';
+    const { access_token: t2 } = await connect(await signedIn(p2, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [p2]);
+    const a2 = claimAndRecheck(await liveGrant(p2, t2) as never);
+    await until(1);
+    await pool.query("UPDATE mcp_grants SET asking_until = now() - interval '1 second' WHERE user_id = $1", [p2]);
+    const b2 = call(t2, 'get_me');
+    await until(2);
+    held[1]!.release('member');
+    assert.equal(roleOf(await b2), 'member');
+    const settledByB = (await row(p2)).checked_at as Date;
+    held[0]!.release('owner');
+    assert.equal(await a2, true);
+    const after2 = await row(p2);
+    assert.equal(after2.role, 'member', 'A’s stale owner answer never reached the role');
+    assert.equal((after2.checked_at as Date).getTime(), settledByB.getTime(), 'B’s settle stands');
+    assert.deepEqual([after2.asking_until, after2.asking_token], [null, null]);
+    assert.equal(roleOf(await call(t2, 'get_me')), 'member', 'the call A served runs as member');
+    assert.equal(held.length, 2, 'nobody asked a third time');
   } finally {
     process.env.AGC_AUTH_URL = was;
     fake.close();

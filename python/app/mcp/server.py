@@ -106,7 +106,9 @@ def _compact(v: Any) -> str:
 # own worker thread) share the one under way, and a call in another process waits for its answer to be written. A lease
 # that passes with no answer was abandoned (the process died or failed), so the waiting call claims it and asks itself:
 # recovery is bounded by the lease. Whichever path lets a call through, the call runs with the role the database holds
-# after it, so the call that sees a demotion already runs demoted.
+# after it, so the call that sees a demotion already runs demoted. Each claim carries its own token (asking_token), and
+# every write the recheck makes (the role, the settle, a revoke, the cleanup) is fenced on it: a process whose lease lapsed
+# and was taken over writes nothing, and its call goes by what the database holds now.
 _rechecking: dict[str, Future[bool]] = {}  # grant id → the recheck (or the wait) under way in this process
 _rechecking_lock = threading.Lock()
 _POLL_S = 0.1
@@ -141,21 +143,26 @@ def _still_let_in(g: dict[str, Any]) -> bool:
 
 def _claim_and_recheck(g: dict[str, Any]) -> bool:
     for _ in range(3):
+        token = str(uuid.uuid4())
         with pool.connection() as conn:
             claimed = conn.execute(
-                "UPDATE mcp_grants SET asking_until = now() + interval '10 seconds' WHERE id = %s AND revoked_at IS NULL"
-                " AND checked_at <= now() - interval '5 minutes' AND (asking_until IS NULL OR asking_until <= now())",
-                (g["id"],),
+                "UPDATE mcp_grants SET asking_until = now() + interval '10 seconds', asking_token = %s WHERE id = %s"
+                " AND revoked_at IS NULL AND checked_at <= now() - interval '5 minutes'"
+                " AND (asking_until IS NULL OR asking_until <= now())",
+                (token, g["id"]),
             ).rowcount
         if claimed:
-            return _recheck(g)
+            outcome = _recheck(g, token)
+            if outcome != "lost":
+                return outcome == "ok"
+            continue  # its lease lapsed and was taken over: its answer counts for nothing; go by what's there now
         seen = _settled(g["id"])  # not due, or another process holds the lease
         if seen != "abandoned":
             return seen == "ok"
     return False  # claimed and abandoned over and over: let no one in this time
 
 
-def _recheck(g: dict[str, Any]) -> bool:
+def _recheck(g: dict[str, Any], token: str) -> str:
     try:
         base = os.environ["AGC_AUTH_URL"]
         if g["subject_iss"] == AGENT_CLOUD:
@@ -187,27 +194,41 @@ def _recheck(g: dict[str, Any]) -> bool:
             with pool.connection() as conn:
                 if isinstance(who, dict) and "role" in who:
                     role = who["role"] if who["role"] in ("owner", "member") else None
-                    _set_role(conn, g["user_id"], role)
-                conn.execute("UPDATE mcp_grants SET checked_at = now(), asking_until = NULL WHERE id = %s", (g["id"],))
-            return True
+                    _set_role(conn, g["user_id"], role, g["id"], token)
+                settled = conn.execute(
+                    "UPDATE mcp_grants SET checked_at = now(), asking_until = NULL, asking_token = NULL"
+                    " WHERE id = %s AND asking_token = %s",
+                    (g["id"], token),
+                ).rowcount
+            return "ok" if settled else "lost"
         with pool.connection() as conn:
-            conn.execute(
-                "UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now(), asking_until = NULL WHERE id = %s",
-                (g["id"],),
-            )
+            revoked = conn.execute(
+                "UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now(), asking_until = NULL,"
+                " asking_token = NULL WHERE id = %s AND asking_token = %s",
+                (g["id"], token),
+            ).rowcount
+        if not revoked:
+            return "lost"
         log.info("agent connection ended: agent.cloud no longer lets this person in", user=g["user_id"], status=status)
-        return False
+        return "revoked"
     finally:
-        # Whatever happened, the lease goes, so a failed recheck never holds the grant: the next call asks again.
+        # Whatever happened, this claim's lease goes (and only this claim's), so a failed recheck never holds the grant.
         try:
             with pool.connection() as conn:
-                conn.execute("UPDATE mcp_grants SET asking_until = NULL WHERE id = %s AND asking_until IS NOT NULL", (g["id"],))
+                conn.execute(
+                    "UPDATE mcp_grants SET asking_until = NULL, asking_token = NULL WHERE id = %s AND asking_token = %s",
+                    (g["id"], token),
+                )
         except Exception as e:  # noqa: BLE001 - the lease runs out by itself if this fails too
             log.warn("a recheck's lease couldn't be cleared; it runs out by itself", grant=g["id"], error=type(e).__name__)
 
 
-def _set_role(conn: Any, user_id: str, role: str | None) -> None:
-    conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
+def _set_role(conn: Any, user_id: str, role: str | None, grant_id: str, token: str) -> None:
+    # Only while this claim still holds the grant's lease: a lapsed claim's answer never reaches the role.
+    conn.execute(
+        "UPDATE users SET role = %s WHERE id = %s AND EXISTS (SELECT 1 FROM mcp_grants WHERE id = %s AND asking_token = %s)",
+        (role, user_id, grant_id, token),
+    )
 
 
 def _settled(grant_id: str) -> str:
