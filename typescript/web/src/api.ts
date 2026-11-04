@@ -2,7 +2,7 @@
 export interface User { id: string; email: string | null; name: string | null }
 export interface Note { id: string; title: string; created_at: string }
 // GET /api/welcome (SPEC.md APP-8): what the welcome page may say, and nothing more.
-export type Run = 'mirror' | 'live' | 'rehearsal' | 'preview' | 'unknown';
+export type Run = 'mirror' | 'private' | 'live' | 'rehearsal' | 'preview' | 'unknown';
 export type PartState = 'running' | 'configured' | 'not set up' | 'not verified';
 export interface Welcome {
   app: string;

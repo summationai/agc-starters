@@ -20,13 +20,14 @@ from .db import DATABASE_URL
 _manifest: dict[str, Any] = tomllib.loads(Path("agentcloud.toml").read_text())
 
 
-def run_of(env: Mapping[str, str]) -> str:
+def run_of(env: Mapping[str, str], preview: str | None = None) -> str:
     """APP-9: where this process runs, first match wins. AGENTCLOUD_MIRROR is agc's; agent.cloud reserves the name, so
-    no release carries it. AGC_RUN is set by agent.cloud after the app's own env, so an app can't claim to be live."""
+    no release carries it. AGC_RUN is set by agent.cloud after the app's own env, so an app can't claim to be live.
+    preview is the request's X-Agc-Preview, which agent.cloud's preview gate sets: it only lowers live to private."""
     if env.get("AGENTCLOUD_MIRROR"):
         return "mirror"
     if env.get("AGC_RUN") == "live":
-        return "live"
+        return "private" if preview == "private" else "live"
     if env.get("AGC_RUN") == "rehearsal":
         return "rehearsal"
     if env.get("AGC_PREVIEW_EXPIRES_AT"):
@@ -128,14 +129,14 @@ def _pair(url: str | None, token: str | None) -> str:
     return "configured" if url and token else "not set up"
 
 
-async def welcome(env: Mapping[str, str]) -> dict[str, Any]:
+async def welcome(env: Mapping[str, str], preview: str | None = None) -> dict[str, Any]:
     db = await database()
     check = _manifest.get("check", {})
     name = _manifest.get("app", {}).get("name")
     return {
         "app": "" if name is None else str(name),
         "stack": "python",
-        "run": run_of(env),
+        "run": run_of(env, preview),
         "parts": {
             "web": "running",
             "api": "running",

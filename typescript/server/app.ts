@@ -6,6 +6,7 @@ import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
+import { runNow } from './jobs.ts';
 import { event, log } from './log.ts';
 import { welcome } from './welcome.ts';
 
@@ -49,7 +50,7 @@ app.use(async (c, next) => {
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
 
 // The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
-app.get('/api/welcome', async (c) => c.json(await welcome()));
+app.get('/api/welcome', async (c) => c.json(await welcome(process.env, c.req.header('x-agc-preview'))));
 
 // Only the API and sign-in look up the session: the UI's files never wait on the database.
 app.use('/api/*', session);
@@ -86,13 +87,15 @@ app.post('/api/notes', body(NoteIn), async (c) => {
   const { title } = c.req.valid('json');
   try {
     // The note and the job that emails about it are saved together, or not at all.
-    const note = await tx(async (db) => {
+    const { note, job } = await tx(async (db) => {
       const { rows } = await db.query<{ id: string; title: string; created_at: string }>(
         'INSERT INTO notes (user_id, title) VALUES ($1, $2) RETURNING id, title, created_at', [user.id, title]);
-      await db.query(`INSERT INTO jobs (kind, payload) VALUES ('note_email', $1)`, [{ note_id: rows[0]!.id }]);
-      return rows[0]!;
+      const queued = await db.query<{ id: string }>(`INSERT INTO jobs (kind, payload) VALUES ('note_email', $1) RETURNING id`, [{ note_id: rows[0]!.id }]);
+      return { note: rows[0]!, job: queued.rows[0]!.id };
     });
     event('note.created', `note:${note.id}`, { related: [`user:${user.id}`] });
+    // JOB-5: the email goes now, not at the worker's next poll; the answer doesn't wait for it, and the worker is the backstop.
+    setImmediate(() => void runNow(job));
     return c.json(note, 201);
   } catch (e) {
     if ((e as { code?: string }).code === '23505') return c.json({ error: { code: 'duplicate', message: 'You already have a note with that title.' } }, 409);

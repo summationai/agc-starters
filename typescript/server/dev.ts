@@ -25,4 +25,7 @@ server.on('request', (req, res) => {
 });
 
 server.listen(Number(PORT), '0.0.0.0', () => log.info('dev server listening', { port: Number(PORT) }));
-process.on('SIGTERM', () => { void ui.close(); server.close(() => process.exit(0)); });
+// DEV-2: node --watch sends SIGTERM and starts the new process only once this one has ended, so end at once. Waiting on
+// server.close() waits on any connection a browser holds open (a preconnected socket), and nothing answers for a minute
+// or more, until agc restarts the app while the old process still holds the port: EADDRINUSE.
+process.on('SIGTERM', () => process.exit(0));
