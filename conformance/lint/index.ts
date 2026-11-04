@@ -238,6 +238,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-4)`);
     if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-4, idle-copy)');
     if (!text.includes('`no-status-route`')) return fail('AGENTS.md doesn\u2019t tell a lake app to serve /api/status (DOC-5)');
+    if (!text.includes('reports that as `restarts`')) return fail('AGENTS.md doesn\u2019t say how to avoid the review\u2019s `restarts` finding (DOC-4)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
