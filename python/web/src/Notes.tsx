@@ -1,6 +1,7 @@
 // The Notes example at /notes (SPEC.md APP-7): sign in, keep notes, and get an email for each one. It shows every piece
 // of the starter working together, and it's yours to remove once your app takes shape.
 import { type FormEvent, useEffect, useState } from 'react';
+import { AgentBadge } from './Agents.tsx';
 import { api, type Note, type User } from './api.ts';
 
 export function Notes() {
@@ -23,12 +24,17 @@ export function Notes() {
     setError(r.error ?? 'Couldn’t save the note.');
     return false;
   }
-  return <NotesView app={app} user={user} notes={notes} error={error} onAdd={add} onSignOut={() => void api.signOut().then(() => setUser(null))} />;
+  async function remove(id: string) {
+    const r = await api.remove(id);
+    if (r.data) { setNotes(notes.filter((n) => n.id !== id)); setError(''); }
+    else setError(r.error ?? 'Couldn’t delete the note.');
+  }
+  return <NotesView app={app} user={user} notes={notes} error={error} onAdd={add} onDelete={(id) => void remove(id)} onSignOut={() => void api.signOut().then(() => setUser(null))} />;
 }
 
 // The page from its state alone, so it renders the same in the browser and in conformance (CONF:welcome-copy).
-export function NotesView({ app, user, notes, error, onAdd, onSignOut }: {
-  app: string; user: User | null | undefined; notes: Note[]; error: string; onAdd: (title: string) => Promise<boolean>; onSignOut: () => void;
+export function NotesView({ app, user, notes, error, onAdd, onDelete, onSignOut }: {
+  app: string; user: User | null | undefined; notes: Note[]; error: string; onAdd: (title: string) => Promise<boolean>; onDelete?: (id: string) => void; onSignOut: () => void;
 }) {
   const [title, setTitle] = useState('');
   async function submit(e: FormEvent) {
@@ -57,7 +63,7 @@ export function NotesView({ app, user, notes, error, onAdd, onSignOut }: {
                 <h1>Your notes</h1>
                 <p>Signed in as {user.name ?? user.email ?? 'you'}. Each new note sends you an email.</p>
               </div>
-              <button type="button" className="btn btn-ghost" onClick={onSignOut}>Sign out</button>
+              <span className="inline"><AgentBadge /><button type="button" className="btn btn-ghost" onClick={onSignOut}>Sign out</button></span>
             </div>
             <form className="add" onSubmit={(e) => void submit(e)}>
               <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="A new note" maxLength={200} aria-label="Note title" />
@@ -65,7 +71,13 @@ export function NotesView({ app, user, notes, error, onAdd, onSignOut }: {
             </form>
             {error && <p className="error" role="alert">{error}</p>}
             <ul className="card list">
-              {notes.map((n) => <li key={n.id}><span>{n.title}</span><time dateTime={n.created_at}>{new Date(n.created_at).toLocaleString()}</time></li>)}
+              {notes.map((n) => (
+                <li key={n.id}>
+                  <span>{n.title}{n.via ? <span className="muted"> · via {n.via}</span> : null}</span>
+                  <span className="inline"><time dateTime={n.created_at}>{new Date(n.created_at).toLocaleString()}</time>
+                    {onDelete && <button type="button" className="btn btn-ghost" aria-label={`Delete ${n.title}`} onClick={() => onDelete(n.id)}>Delete</button>}</span>
+                </li>
+              ))}
               {!notes.length && <li className="muted">No notes yet.</li>}
             </ul>
             <div className="how">

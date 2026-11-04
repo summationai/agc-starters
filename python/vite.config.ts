@@ -10,5 +10,8 @@ export default defineConfig({
   plugins: [react()],
   build: { outDir: 'dist', emptyOutDir: true },
   // Keep the browser's Host: the API compares it with Origin before accepting a write (SEC-6).
-  server: { proxy: { '/api': { target: api, changeOrigin: false }, '/auth': { target: api, changeOrigin: false } } },
+  // Agents over MCP too: /mcp (and its /mcp/agents API), its OAuth, and their metadata.
+  server: {
+    proxy: Object.fromEntries(['/api', '/auth', '/mcp', '/oauth/', '/.well-known/oauth-'].map((p) => [p, { target: api, changeOrigin: false }])),
+  },
 });

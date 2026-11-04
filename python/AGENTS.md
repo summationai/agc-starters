@@ -21,6 +21,7 @@ While you build an open Work item, people in the app's organization can watch yo
 
 ```text
 app/main.py        every route: /api/*, health, the JSON-only rule for changes, error handling, the built UI
+app/mcp/           /mcp for people's own agents: its OAuth, the tools (your /api routes), the /agents pages' API
 app/auth.py        sign-in through agent.cloud, and sessions
 app/worker.py      the job loop, and one handler per job kind (python -m app.worker)
 app/db.py          the pool, and tx() for writes that belong together
@@ -29,14 +30,15 @@ app/__main__.py    starts uvicorn on 0.0.0.0:$PORT (python -m app)
 dev.sh             agc up's dev command: uvicorn --reload behind Vite
 app/welcome.py     GET /api/welcome: the welcome page's facts; remove it with the welcome page
 app/storage.py     sign_upload, sign_download and delete, for files people upload once agentcloud.toml declares [storage]
-web/src/           the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
+web/src/           the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), Agents.tsx (/agents), api.ts
 migrations/        schema changes, as plain SQL (agc migration new <slug>)
 seed.sql           a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```
 
 ## How to add things
 
-- **An API route:** in `app/main.py`, under `/api/`. Call `signed_in(request)` for anything personal. Endpoints that touch the database are plain `def` (FastAPI runs them in a thread). Changes take a JSON body (any other body gets 415), checked by a model (below).
+- **An API route:** in `app/main.py`, under `/api/`, with a docstring that says what it does and returns. Call `signed_in(request)` for anything personal. Endpoints that touch the database are plain `def` (FastAPI runs them in a thread). Changes take a JSON body (any other body gets 415), checked by a model (below).
+- **People's agents use it too:** every `/api` route is also a tool a person's own agent (Claude, ChatGPT, Codex, Cursor) calls at `/mcp`, as that person, after they say yes once at `/agents` (`app/mcp/`). Its docstring (or `summary=`) is what the agent reads; its parameters and body model are the tool's input. `DELETE`, or `openapi_extra={"x-mcp-destructive": True}`, asks the person first. A route agents mustn't call takes `openapi_extra=mcp.exclude('<why>')`; one with no docstring is listed as missing. Keep every change the UI makes going through `web/src/api.ts` to an `/api` route, so agents can do it too.
 - **A table or column:** `agc migration new <slug>`, then plain SQL in the new file, then `agc migrate`. Key things on `uuid`. Use `CHECK (status IN (…))` for fixed sets of values, so mirrors show them. Never change the schema from code: no Alembic, no `create_all()`.
 - **A foreign key:** index it in the migration that adds it, as `sessions_user` does for `sessions.user_id` (for a key over several columns, an index that starts with them, in order). Postgres doesn't make one, so looking rows up by the key, and deleting from the table it references, scan the whole table once it grows. `agc check` warns about one without, and agent.cloud's review files it as `unindexed-fk`.
 - **A check:** every main journey gets a `[[check.smoke]]` and every rule the data must keep a `[[check.invariant]]` in `agentcloud.toml`, then `agc check`. Never ship with none: a release that goes live on its own would go live with nothing checked, and agent.cloud's review files that (`no-checks`, "Releases go live with nothing checked"). The notes example's two checks are this app's only ones, so when you remove the example, replace them with your app's own.

@@ -20,6 +20,7 @@ While you build an open Work item, people in the app's organization can watch yo
 
 ```text
 server/app.ts       every route: /api/*, health, the JSON-only rule for changes, error handling
+server/mcp/         /mcp for people's own agents: its OAuth, the tools (your /api routes), the /agents pages' API
 server/auth.ts      sign-in through agent.cloud, and sessions
 server/worker.ts    the job loop, and one handler per job kind
 server/db.ts        the pool, and tx() for writes that belong together
@@ -27,14 +28,15 @@ server/log.ts       JSON logs, and event() for workflow steps
 server/main.ts      production: the API plus web/dist          server/dev.ts  development: the API plus Vite
 server/welcome.ts   GET /api/welcome: the welcome page's facts; remove it with the welcome page
 server/storage.ts   signUpload, signDownload and delete, for files people upload once agentcloud.toml declares [storage]
-web/src/            the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), api.ts
+web/src/            the UI: App.tsx (the welcome page at /), Notes.tsx (the example at /notes), Agents.tsx (/agents), api.ts
 migrations/         schema changes, as plain SQL (agc migration new <slug>)
 seed.sql            a demo person and three notes for a mirror that starts empty (agc up); never runs in production
 ```
 
 ## How to add things
 
-- **An API route:** in `server/app.ts`, under `/api/`. Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415), checked by a schema (below).
+- **An API route:** in `server/app.ts`, under `/api/`, registered with `api()` (below). Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415), checked by a schema.
+- **People's agents use it too:** every `/api` route registered with `api()` is also a tool a person's own agent (Claude, ChatGPT, Codex, Cursor) calls at `/mcp`, as that person, after they say yes once at `/agents` (`server/mcp/`). Its `summary` is what the agent reads: say what it does and returns. `DELETE`, or `destructive: true`, asks the person first. A route agents mustn't call takes `exclude(method, path, '<why>')`; one registered with `app.get` and no `exclude` is listed as missing. Keep every change the UI makes going through `web/src/api.ts` to an `/api` route, so agents can do it too.
 - **A table or column:** `agc migration new <slug>`, then plain SQL in the new file, then `agc migrate`. Key things on `uuid`. Use `CHECK (status IN (…))` for fixed sets of values, so mirrors show them. Never change the schema from code.
 - **A foreign key:** index it in the migration that adds it, as `sessions_user` does for `sessions.user_id` (for a key over several columns, an index that starts with them, in order). Postgres doesn't make one, so looking rows up by the key, and deleting from the table it references, scan the whole table once it grows. `agc check` warns about one without, and agent.cloud's review files it as `unindexed-fk`.
 - **A check:** every main journey gets a `[[check.smoke]]` and every rule the data must keep a `[[check.invariant]]` in `agentcloud.toml`, then `agc check`. Never ship with none: a release that goes live on its own would go live with nothing checked, and agent.cloud's review files that (`no-checks`, "Releases go live with nothing checked"). The notes example's two checks are this app's only ones, so when you remove the example, replace them with your app's own.
@@ -46,15 +48,14 @@ seed.sql            a demo person and three notes for a mirror that starts empty
 
 ## Validate every request body
 
-Validate every request body with a schema: it's how a route takes input here. Existing routes and other validators are fine, and nothing in agent.cloud checks for it. The notes route shows the pattern: a Zod 4 schema checks the body before the handler runs, and the handler reads the parsed value, typed, with no cast.
+Validate every request body with a schema: it's how a route takes input here. The notes route shows the pattern: `api()` mounts the route, a Zod 4 schema checks the body (`json`) or query (`query`) before the handler runs, and the handler gets the parsed value, typed, with no cast. The same schema is the route's tool input for agents.
 
 ```ts
 const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
-app.post('/api/notes', body(NoteIn), async (c) => {
-  const { title } = c.req.valid('json');
+api(app, 'post', '/api/notes', { summary: 'Add a note with a title.', json: NoteIn }, async (c, { json: { title } }) => {
 ```
 
-- `body()` in `server/app.ts` answers 400 `{"error": {"code": "bad_request", "message": "title: …"}}` for a body that doesn't fit. `z.infer<typeof NoteIn>` is its type, if you need one.
+- A body that doesn't fit answers 400 `{"error": {"code": "bad_request", "message": "title: …"}}`. `z.infer<typeof NoteIn>` is its type, if you need one.
 - This is Zod 4, and much example code is Zod 3. Write `z.email()`, `z.url()`, `z.uuid()` and `z.iso.datetime()`, not `z.string().email()`; give a custom message as `{ error: '…' }`, not `message` or `errorMap`.
 - `z.object` drops unknown fields; `z.strictObject` refuses them.
 - The environment (`server/env.ts`) and database rows (CHECK constraints) aren't request bodies: leave them as they are.

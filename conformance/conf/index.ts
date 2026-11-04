@@ -10,6 +10,7 @@ import { run, sleep, until } from '../lib/sh.ts';
 import type { Stack } from '../lib/stack.ts';
 import { dev } from './dev.ts';
 import { cookieAttrs, type Jar, req, type Res, signIn, UUID } from './http.ts';
+import { mcpTests } from './mcp.ts';
 import { storageTests } from './storage.ts';
 import { welcomeApi, welcomeCopy } from './welcome.ts';
 
@@ -26,6 +27,7 @@ export const CONF_TESTS = [
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
   'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
+  'CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -422,6 +424,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         set('CONF:seed', (ok ? pass : fail)(s.problem ?? `signed in as the demo id: GET /api/notes ${list.status} with ${got.length} notes (${expected.length} seeded)${JSON.stringify(got) === JSON.stringify(expected) ? ', the seeded ones' : ', not the seeded ones'}; applied twice: ${before} then ${again} notes${seedError ? `; second apply failed: ${seedError}` : ''}`));
       }
     }
+
+    // AMCP-1 to AMCP-8, AMCP-10: a person's own agent, over MCP.
+    opts.log('agents over MCP\u2026');
+    for (const [k, v] of await mcpTests(env, web, stack, opts.log)) set(k, v);
 
     // MAIL-1, APP-4: the worker emails the person, keyed by the note.
     {
