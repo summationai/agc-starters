@@ -240,6 +240,16 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
 
   Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
 
+### The app's icon and link preview (APP-14)
+
+- **APP-14:** Every page the starter serves has agent.cloud's icon and link-preview tags in its `<head>`, served in the HTML itself so a link unfurler that runs no JavaScript sees them. This is proposed with agent.cloud's [app-icons spec](https://github.com/summationai/agent-cloud/blob/main/docs/specs/app-icons.md) (agent-cloud#4295) (ICON-7) and isn't built yet, so conformance doesn't check it until the build lands. The tags:
+  - `<link rel="icon" href="/.agc/brand/favicon.ico" sizes="any">`, `<link rel="icon" type="image/svg+xml" href="/.agc/brand/favicon.svg">` and `<link rel="apple-touch-icon" href="/.agc/brand/apple-touch-icon.png">`;
+  - `<link rel="manifest" href="/.agc/brand/site.webmanifest">`;
+  - `og:image` and `twitter:image` (with `twitter:card` set to `summary_large_image`) as the absolute URL `<AGENTCLOUD_APP_URL>/.agc/brand/preview.png`, which the server fills in when it serves the page;
+  - `og:title` and `og:description`, the page's own title and description.
+
+  These are agent.cloud's paths, not the app's files: the starter ships no icon of its own, and agent.cloud serves the app's icon set there (ICON-6). Where `AGENTCLOUD_APP_URL` isn't set, the page leaves out `og:image` and `twitter:image` instead of writing a relative URL. `review` until the build adds its conformance check.
+
 ## 12. The conformance descriptor
 
 Auto-reload (DEV-2 to DEV-4) can only be proven by editing a real file, so each starter says which, in `conformance.toml` at its root. `agc init` doesn't copy this file.
