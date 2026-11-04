@@ -69,14 +69,15 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
     if not email:
         return None
     name = (request.headers.get("x-agc-user-name") or "").strip() or None
+    role = "owner" if request.headers.get("x-agc-user-role") == "owner" else "member"
     user_id = _id_of(email)
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO users (id, email, name) VALUES (%s, %s, %s)"
-            " ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()",
-            (user_id, email, name),
+            "INSERT INTO users (id, email, name, role) VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role, last_seen_at = now()",
+            (user_id, email, name, role),
         )
-    return {"id": user_id, "email": email, "name": name}
+    return {"id": user_id, "email": email, "name": name, "role": role}
 
 
 # AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
@@ -171,7 +172,23 @@ def _still_let_in(key: str, user_id: str, started: float) -> bool:
         _asking.pop(key, None)
 
 
+def _agent(request: Request) -> dict[str, Any] | None:
+    """AMCP-4: a tool call the MCP module runs in-process carries its person in the request scope's state, which nothing
+    from the network can set: {"user": ..., "via": <the agent's name>}."""
+    agent = getattr(request.state, "agc_mcp", None)
+    return agent if isinstance(agent, dict) else None
+
+
+def via_of(request: Request) -> str | None:
+    """The agent a request came through (AMCP-7), or None for the person's own browser."""
+    agent = _agent(request)
+    return agent["via"] if agent else None
+
+
 def current_user(request: Request) -> dict[str, Any] | None:
+    agent = _agent(request)
+    if agent:
+        return agent["user"]
     if EDGE:
         return _edge_user(request)
     token = request.cookies.get(SESSION)
@@ -180,7 +197,7 @@ def current_user(request: Request) -> dict[str, Any] | None:
     key = _hash(token)
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT u.id::text AS id, u.email, u.name, s.expires_at,"
+            "SELECT u.id::text AS id, u.email, u.name, u.role, s.expires_at,"
             " s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
             " FROM sessions s JOIN users u ON u.id = s.user_id"
             " WHERE s.token_hash = %s AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'",
@@ -231,9 +248,10 @@ def callback(request: Request, code: str = "", state: str = "") -> Response:
     token = secrets.token_urlsafe(32)
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO users (id, email, name) VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE"
-            " SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()",
-            (user["id"], user.get("email"), user.get("name")),
+            "INSERT INTO users (id, email, name, role) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO UPDATE"
+            " SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role,"
+            " last_seen_at = now()",
+            (user["id"], user.get("email"), user.get("name"), user.get("role") if user.get("role") in ("owner", "member") else None),
         )
         conn.execute(
             "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + interval '1 day')",
