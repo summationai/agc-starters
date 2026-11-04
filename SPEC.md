@@ -97,7 +97,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
   - If that run can't finish (the process stops, the lease is already held, or the job fails), the job stays queued and the worker runs it at its next poll, as JOB-4 says. Each job runs at most once at a time and is safe to run twice (JOB-2, JOB-3), so a run in both places sends each email key once (MAIL-2).
   - The web process never polls, never listens and holds no connection once the run ends, so JOB-4's sleeping database still holds.
 
-  `review` until the build adds its conformance check: with a 600 s idle ceiling, a note's email arrives within 5 s of its POST; and with the web process stopped right after it answers, the worker sends that email once.
+  `CONF:jobs-prompt` (with the worker stopped, a note's email arrives within 5 s of its POST; a second web process whose email service never answers, stopped mid-run, leaves the job to the worker, which sends it once)
 
 ### Storage (`docs/specs/app-storage.md`: STO-3, STO-6, STO-12; `agc help storage`)
 Files people upload go to the app's bucket through signed URLs, never through the server or into Postgres. Each starter carries the helper an app calls once its `agentcloud.toml` declares `[storage]`; the starter itself declares none. STOR-1 through STOR-7 are proven by the stack's own tests against a fake S3 endpoint with fake keys, which `conformance.toml` names (`[storage] test`, §12) and `CONF:storage` runs. STOR-8 is a documentation review.

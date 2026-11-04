@@ -9,7 +9,7 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +20,7 @@ from . import log
 from .auth import router as auth_router
 from .auth import signed_in
 from .db import pool, tx
+from .jobs import run_now
 from .welcome import welcome as welcome_facts
 
 UI = Path("web/dist")
@@ -110,25 +111,31 @@ class NoteIn(BaseModel):
 
 
 @app.post("/api/notes", status_code=201)
-async def add_note(request: Request, body: NoteIn) -> Response:
+async def add_note(request: Request, body: NoteIn, background: BackgroundTasks) -> Response:
     user = await asyncio.to_thread(signed_in, request)
     try:
-        note = await asyncio.to_thread(_insert_note, user["id"], body.title)
+        note, job_id = await asyncio.to_thread(_insert_note, user["id"], body.title)
     except psycopg.errors.UniqueViolation:
         return JSONResponse({"error": {"code": "duplicate", "message": "You already have a note with that title."}}, 409)
     log.event("note.created", f"note:{note['id']}", related=[f"user:{user['id']}"])
+    # JOB-5: the email goes now, not at the worker's next poll. A background task runs after the response is sent, so the
+    # answer doesn't wait for it, and the worker is the backstop.
+    background.add_task(run_now, job_id)
     return JSONResponse({**note, "created_at": note["created_at"].isoformat()}, 201)
 
 
-def _insert_note(user_id: str, title: str) -> dict[str, Any]:
+def _insert_note(user_id: str, title: str) -> tuple[dict[str, Any], int]:
     # The note and the job that emails about it are saved together, or not at all.
     with tx() as conn:
         note = conn.execute(
             "INSERT INTO notes (user_id, title) VALUES (%s, %s) RETURNING id::text AS id, title, created_at", (user_id, title)
         ).fetchone()
         assert note is not None
-        conn.execute("INSERT INTO jobs (kind, payload) VALUES ('note_email', jsonb_build_object('note_id', %s::text))", (note["id"],))
-    return note
+        job = conn.execute(
+            "INSERT INTO jobs (kind, payload) VALUES ('note_email', jsonb_build_object('note_id', %s::text)) RETURNING id", (note["id"],)
+        ).fetchone()
+        assert job is not None
+    return note, job["id"]
 
 
 # Only for agent.cloud's conformance suite: an error and a slow request, to prove logging and graceful shutdown.
