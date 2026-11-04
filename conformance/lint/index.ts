@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { lintChecks, readChecks } from '../vendor/agc/checks.ts';
-import { secretIn } from '../vendor/agc/github.ts';
+import { secretIn } from '../vendor/agc/secret-in.ts';
 import { listMigrations } from '../vendor/agc/migrations.ts';
 import { fail, pass, verdict, type TestResult } from '../lib/report.ts';
 import type { Stack } from '../lib/stack.ts';

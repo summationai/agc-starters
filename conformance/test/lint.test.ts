@@ -42,6 +42,7 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:no-cors', await broken((d) => writeFileSync(join(d, 'server', 'cors.ts'), "import { cors } from 'hono/cors';\n"))), 'fail');
   assert.equal(outcome('LINT:db-config', await broken((d) => writeFileSync(join(d, 'server', 'db.ts'), 'export const ssl = { rejectUnauthorized: false };\n'))), 'fail');
   assert.equal(outcome('LINT:secrets', await broken((d) => writeFileSync(join(d, 'server', 'key.ts'), `export const k = '${['sk', 'live', 'x'.repeat(24)].join('_')}';\n`))), 'fail');
+  assert.equal(outcome('LINT:secrets', await broken((d) => writeFileSync(join(d, 'server', 'token.ts'), `export const t = '${['agc', 'oa_', 'x'.repeat(16)].join('')}';\n`))), 'fail', 'an agent.cloud token shape, as control scans today');
   assert.equal(outcome('LINT:secrets', await broken((d) => writeFileSync(join(d, '.env'), 'X=1\n'))), 'fail');
   assert.equal(outcome('LINT:no-migrator', await broken((d) => writeFileSync(join(d, 'package.json'), '{ "name": "starter", "dependencies": { "prisma": "^6" } }\n'))), 'fail');
   assert.equal(outcome('LINT:no-migrator', await broken((d) => writeFileSync(join(d, 'server', 'olap.py'), "duck.execute('CREATE TABLE t AS SELECT 1')\n"))), 'pass', 'in-process DuckDB DDL is fine');
