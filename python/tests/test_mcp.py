@@ -234,6 +234,13 @@ def test_amcp_4_5_7_read_and_write_as_the_person_a_delete_asks_first_and_revoke_
     signed_in(OWNER, "owner")
     theirs = sql("INSERT INTO notes (user_id, title) VALUES (%s, 'theirs') RETURNING id::text AS id", OWNER)[0]["id"]
 
+    # AMCP-4 to AMCP-6 (codex on #62): a dot segment can't move a call onto another route than the one checked.
+    for dot in ("..", "."):
+        moved = call(token, "delete_notes_by_id", {"id": dot})
+        assert moved["isError"] is True
+        assert 'can\u2019t be "." or ".."' in moved["content"][0]["text"]
+    assert sql("SELECT count(*)::int AS n FROM mcp_approvals WHERE tool = 'delete_notes_by_id'") == [{"n": 0}]
+
     # AMCP-5: the first DELETE runs nothing and asks; after approval, the same call runs once.
     asked = call(token, "delete_notes_by_id", {"id": note["id"]})
     assert asked["isError"] is True

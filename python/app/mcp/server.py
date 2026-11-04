@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import posixpath
 import re
 import secrets
 import threading
@@ -439,6 +440,20 @@ def _handle(app: FastAPI, request: Request, raw: bytes) -> Response:
             return tool_error(f"{APP_NAME}'s owner doesn't let agents use {name}.")
         return tool_error(f"{name} changes things, and this connection can only read. The person can reconnect with Read and act.")
 
+    missing = [p for p in tool["params"] if isinstance(args.get(p), bool) or not isinstance(args.get(p), str | int | float)]
+    if missing:
+        record("error")
+        return tool_error(f"Missing {', '.join(missing)}.")
+    unknown = [k for k in args if k not in tool["params"] and k not in tool["query"] and k not in tool["body"]]
+    if unknown:
+        record("error")
+        return tool_error(f"Unknown argument{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}.")
+    # AMCP-4, AMCP-5, AMCP-6: the call lands on exactly the route whose scope, block and approval were checked. A path argument
+    # can't be a dot segment, and the path built must be the path served (the same rule as the TypeScript stack's).
+    dots = [p for p in tool["params"] if str(args[p]) in (".", "..")]
+    if dots:
+        record("error")
+        return tool_error(f'{", ".join(dots)} can\u2019t be "." or "..".')
     # AMCP-5: a destructive call runs only once its person approves this exact call, on the app's own page.
     if tool["destructive"]:
         args_hash = hashlib.sha256(_stable(args).encode()).hexdigest()
@@ -480,15 +495,10 @@ def _handle(app: FastAPI, request: Request, raw: bytes) -> Response:
             )
 
     # AMCP-4: the route itself, in-process, as the person.
-    missing = [p for p in tool["params"] if isinstance(args.get(p), bool) or not isinstance(args.get(p), str | int | float)]
-    if missing:
-        record("error")
-        return tool_error(f"Missing {', '.join(missing)}.")
-    unknown = [k for k in args if k not in tool["params"] and k not in tool["query"] and k not in tool["body"]]
-    if unknown:
-        record("error")
-        return tool_error(f"Unknown argument{'s' if len(unknown) > 1 else ''}: {', '.join(unknown)}.")
     path = re.sub(r"\{([A-Za-z0-9_]+)(:[^}]*)?\}", lambda mm: quote(str(args[mm[1]]), safe=""), tool["route_path"])
+    if posixpath.normpath(path) != path.rstrip("/") or "//" in path:
+        record("error")
+        return tool_error("That path doesn\u2019t name this tool\u2019s route.")
     query = urlencode([(k, args[k] if isinstance(args[k], str) else _compact(args[k])) for k in tool["query"] if k in args])
     body = None if tool["method"] == "GET" else _compact({k: args[k] for k in tool["body"] if k in args}).encode()
     status, raw_answer = anyio.from_thread.run(

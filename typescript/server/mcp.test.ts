@@ -117,6 +117,14 @@ test('AMCP-4, AMCP-5, AMCP-7: read and write as the person, a DELETE asks first,
   const { rows: [theirs] } = await pool.query<{ id: string }>("INSERT INTO notes (user_id, title) VALUES ($1, 'theirs') RETURNING id", [OWNER]);
   assert.ok(other);
 
+  // AMCP-4 to AMCP-6 (codex on #62): a dot segment can't move a call onto another route than the one checked.
+  for (const id of ['..', '.']) {
+    const moved = await call(token, 'delete_notes_by_id', { id });
+    assert.equal(moved.isError, true, id);
+    assert.match(moved.content[0]!.text, /can\u2019t be "\." or "\.\."/, id);
+  }
+  assert.equal((await pool.query("SELECT count(*)::int AS n FROM mcp_approvals WHERE tool = 'delete_notes_by_id'")).rows[0].n, 0, 'nothing was even asked for');
+
   // AMCP-5: the first DELETE runs nothing and asks; after approval, the same call runs once.
   const asked = await call(token, 'delete_notes_by_id', { id: note.id });
   assert.equal(asked.isError, true);

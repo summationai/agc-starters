@@ -187,6 +187,14 @@ export function mcpServer(app: Hono<Env>) {
         : `${name} changes things, and this connection can only read. The person can reconnect with Read and act.`);
     }
 
+    const missing = tool.params.filter((p) => typeof args[p] !== 'string' && typeof args[p] !== 'number');
+    if (missing.length) { await record('error'); return toolError(`Missing ${missing.join(', ')}.`); }
+    const unknown = Object.keys(args).filter((k) => !tool.params.includes(k) && !tool.query.includes(k) && !tool.body.includes(k));
+    if (unknown.length) { await record('error'); return toolError(`Unknown argument${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}.`); }
+    // AMCP-4, AMCP-5, AMCP-6: the call lands on exactly the route whose scope, block and approval were checked. A path argument
+    // can't be a dot segment, which the Request would normalize into another route, and the path built must be the path served.
+    const dots = tool.params.filter((p) => String(args[p]) === '.' || String(args[p]) === '..');
+    if (dots.length) { await record('error'); return toolError(`${dots.join(', ')} can\u2019t be "." or "..".`); }
     // AMCP-5: a destructive call runs only once its person approves this exact call, on the app's own page.
     if (tool.destructive) {
       const argsHash = createHash('sha256').update(stable(args)).digest('hex');
@@ -206,11 +214,8 @@ export function mcpServer(app: Hono<Env>) {
     }
 
     // AMCP-4: the route itself, in-process, as the person. Nothing from the network can set c.env.mcp.
-    const missing = tool.params.filter((p) => typeof args[p] !== 'string' && typeof args[p] !== 'number');
-    if (missing.length) { await record('error'); return toolError(`Missing ${missing.join(', ')}.`); }
-    const unknown = Object.keys(args).filter((k) => !tool.params.includes(k) && !tool.query.includes(k) && !tool.body.includes(k));
-    if (unknown.length) { await record('error'); return toolError(`Unknown argument${unknown.length > 1 ? 's' : ''}: ${unknown.join(', ')}.`); }
     const path = tool.path.replace(/:([A-Za-z0-9_]+)/g, (_, p: string) => encodeURIComponent(String(args[p])));
+    if (new URL(path, 'http://app.invalid').pathname !== path) { await record('error'); return toolError('That path doesn\u2019t name this tool\u2019s route.'); }
     const query = new URLSearchParams(tool.query.filter((k) => args[k] !== undefined).map((k) => [k, typeof args[k] === 'string' ? args[k] as string : JSON.stringify(args[k])]));
     const body = Object.fromEntries(tool.body.filter((k) => args[k] !== undefined).map((k) => [k, args[k]]));
     const res = await app.request(`${path}${query.size ? `?${query}` : ''}`, {
