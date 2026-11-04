@@ -29,6 +29,7 @@ from psycopg.rows import DictRow
 from .. import log
 from ..auth import current_user
 from ..db import pool, tx
+from .identity import Subject, identity_of
 
 ACCESS_SECONDS = 600
 GRANT_SECONDS = 30 * 86_400
@@ -353,12 +354,18 @@ def mount_oauth(app: FastAPI) -> None:
         if not user:
             here = request.url.path + (f"?{request.url.query}" if request.url.query else "")
             return RedirectResponse(f"/auth/sign-in?return_to={quote(here, safe='')}", 302)
+        # AMCP-7: a grant names its person by a stable identity; a sign-in that can't give one can't grant.
+        who = identity_of(request, user)
+        if not who.subject:
+            return PlainTextResponse(who.message or "", 403)
         consent = seal(
             "mq1",
             {
                 "n": str(uuid.uuid4()),
                 "a": resource_of(request),
                 "u": user["id"],
+                "si": who.subject.iss,
+                "sp": who.subject.id,
                 "cl": q["client_id"],
                 "r": redirect,
                 "ch": q["code_challenge"],
@@ -417,11 +424,13 @@ def mount_oauth(app: FastAPI) -> None:
             else:
                 assert client is not None
                 g = conn.execute(
-                    "INSERT INTO mcp_grants (id, user_id, client_id, client_name, scope, resource, expires_at)"
-                    " VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING *",
+                    "INSERT INTO mcp_grants (id, user_id, subject_iss, subject_id, client_id, client_name, scope, resource, expires_at)"
+                    " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING *",
                     (
                         str(uuid.uuid4()),
                         code["u"],
+                        code["si"],
+                        code["sp"],
                         code["cl"],
                         client["n"],
                         code["s"],
@@ -467,10 +476,11 @@ def mount_oauth(app: FastAPI) -> None:
                 )
 
 
-def consent_of(sealed: object, user: dict[str, Any], res: str) -> dict[str, Any] | None:
-    """The consent page's question (/agents/consent, through /mcp/agents/consent)."""
+def consent_of(sealed: object, user: dict[str, Any], subject: Subject, res: str) -> dict[str, Any] | None:
+    """The consent page's question (/agents/consent, through /mcp/agents/consent), for this person only."""
     q = unseal("mq1", sealed)
-    return q if q and q.get("u") == user["id"] and q.get("e", 0) >= now_ms() and q.get("a") == res else None
+    mine = q and q.get("u") == user["id"] and q.get("si") == subject.iss and q.get("sp") == subject.id
+    return q if q and mine and q.get("e", 0) >= now_ms() and q.get("a") == res else None
 
 
 def decide(q: dict[str, Any], allow: bool, scope: str, origin: str) -> str | None:
@@ -480,6 +490,8 @@ def decide(q: dict[str, Any], allow: bool, scope: str, origin: str) -> str | Non
         code = {
             "a": q["a"],
             "u": q["u"],
+            "si": q["si"],
+            "sp": q["sp"],
             "cl": q["cl"],
             "r": q["r"],
             "ch": q["ch"],

@@ -8,9 +8,7 @@ import json
 import os
 import re
 import secrets
-import tomllib
 import uuid
-from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -23,20 +21,12 @@ from psycopg.types.json import Jsonb
 from starlette.types import Message
 
 from .. import log
-from ..auth import EDGE
 from ..db import pool
+from .app_name import APP_NAME
+from .identity import AGENT_CLOUD
 from .oauth import challenge, grant_of, js_time, origin_of, resource_of
 from .tools import Tool, catalog
 
-
-def _app_name() -> str:
-    try:
-        return str(tomllib.loads(Path("agentcloud.toml").read_text()).get("app", {}).get("name") or "This app")
-    except (OSError, tomllib.TOMLDecodeError):
-        return "This app"
-
-
-APP_NAME = _app_name()  # the app's name, from its manifest, read once
 PROTOCOLS = ("2025-06-18", "2025-11-25")
 POINT_GET = {
     "name": "point_get",
@@ -109,32 +99,49 @@ def _compact(v: Any) -> str:
 
 
 def _still_let_in(g: dict[str, Any]) -> bool:
-    """AMCP-7: a grant is rechecked with agent.cloud as a session is (AUTH-8): at most once every 5 minutes, and only a
-    2xx, or agent.cloud not answering, keeps it. Behind a target's gate there's no agent.cloud user to ask about."""
-    if EDGE:
-        return True
+    """AMCP-7: a grant is rechecked with agent.cloud as a session is (AUTH-8): at most once every 5 minutes. On
+    agent.cloud's sign-in it asks about the app user (GET /users/<id>); on edge sign-in, about the gate's issuer and
+    provider_id (GET /people, agent.cloud's AMCP-15). Only a 2xx, or agent.cloud not answering, keeps it; a 2xx's role
+    replaces the person's stored role, so a role taken away takes the owner's controls with it (AMCP-6)."""
     with pool.connection() as conn:
         claimed = conn.execute(
             "UPDATE mcp_grants SET checked_at = now() WHERE id = %s AND checked_at <= now() - interval '5 minutes'", (g["id"],)
         ).rowcount
     if not claimed:
         return True
+    base = os.environ["AGC_AUTH_URL"]
+    if g["subject_iss"] == AGENT_CLOUD:
+        url = f"{base}/users/{quote(g['user_id'], safe='')}"
+    else:
+        url = f"{base}/people?{urlencode({'iss': g['subject_iss'], 'provider_id': g['subject_id']})}"
     status: int | None = None
+    body: Any = None
     try:
-        with httpx.stream(
-            "GET",
-            f"{os.environ['AGC_AUTH_URL']}/users/{quote(g['user_id'], safe='')}",
+        r = httpx.get(
+            url,
             headers={
                 "authorization": f"Bearer {os.environ['AGC_AUTH_TOKEN']}",
                 "x-agc-session-start": str(int(g["created_at"].timestamp() * 1000)),
             },
             timeout=5,
             follow_redirects=False,
-        ) as r:
-            status = r.status_code
+        )
+        status = r.status_code
+        if r.is_success:
+            try:
+                body = r.json()
+            except ValueError:
+                body = None
     except httpx.HTTPError:
         pass  # agent.cloud didn't answer: keep it, and ask again in 5 minutes
-    if status is None or status >= 500 or 200 <= status < 300:
+    if status is not None and 200 <= status < 300:
+        who = body.get("user", body) if isinstance(body, dict) else None
+        if isinstance(who, dict) and "role" in who:
+            role = who["role"] if who["role"] in ("owner", "member") else None
+            with pool.connection() as conn:
+                conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, g["user_id"]))
+        return True
+    if status is None or status >= 500:
         return True
     with pool.connection() as conn:
         conn.execute("UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()) WHERE id = %s", (g["id"],))
@@ -341,7 +348,8 @@ def _handle(app: FastAPI, request: Request, raw: bytes) -> Response:
         record("ok")
         with pool.connection() as conn:
             p = conn.execute(
-                "SELECT pick, at FROM mcp_points WHERE user_id = %s AND at > now() - interval '10 minutes'", (g["user_id"],)
+                "SELECT pick, at FROM mcp_points WHERE subject_iss = %s AND subject_id = %s AND at > now() - interval '10 minutes'",
+                (g["subject_iss"], g["subject_id"]),
             ).fetchone()
         text = _compact({**p["pick"], "at": js_time(p["at"])}) if p else "They haven’t pointed at anything in the last 10 minutes."
         return ok({"content": [{"type": "text", "text": marked(text)}]})

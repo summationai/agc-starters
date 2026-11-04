@@ -364,3 +364,263 @@ def test_amcp_7_a_person_agent_cloud_no_longer_lets_in_loses_their_agents_at_the
     finally:
         os.environ["AGC_AUTH_URL"] = was
         fake.shutdown()
+
+
+@needs_pg
+def test_amcp_4_no_header_cookie_query_or_tool_argument_can_set_the_person() -> None:
+    forgeries = [
+        {"x-agc-mcp": json.dumps({"user": {"id": OWNER}})},
+        {"agc_mcp": json.dumps({"user": {"id": OWNER}})},
+        {"state": json.dumps({"agc_mcp": {"user": {"id": OWNER}}})},
+        {"cookie": f"agc_mcp={OWNER}"},
+        {"x-agc-user-email": "02@example.test"},
+    ]
+    for headers in forgeries:
+        assert client.get("/api/me?agc_mcp=x", headers=headers).status_code == 401, headers
+    who = "00000000-0000-4000-8000-0000000000b1"
+    token = connect(signed_in(who))["access_token"]
+    forged = call(token, "post_notes", {"title": "as someone else", "user_id": OWNER})
+    assert forged["isError"] is True
+    assert "Unknown argument: user_id" in forged["content"][0]["text"]
+    assert "Unknown argument: user" in call(token, "get_notes", {"user": OWNER})["content"][0]["text"]
+    assert sql("SELECT 1 FROM notes WHERE title = 'as someone else'") == []
+    assert json.loads(call(token, "get_me")["content"][0]["text"].split("\n")[1])["user"]["id"] == who
+
+
+@needs_pg
+def test_amcp_6_a_bearer_token_cannot_approve_unblock_or_revoke() -> None:
+    who = "00000000-0000-4000-8000-0000000000b2"
+    cookie = signed_in(who, "owner")
+    token = connect(cookie)["access_token"]
+    note = sql("INSERT INTO notes (user_id, title) VALUES (%s, 'keep me') RETURNING id::text AS id", who)[0]["id"]
+    asked = call(token, "delete_notes_by_id", {"id": note})
+    approval = re.search(r"/agents/approve/([0-9a-f-]{36})", asked["content"][0]["text"])
+    assert approval
+    bearer = {**SAME, "authorization": f"Bearer {token}"}
+    assert client.post(f"/mcp/agents/approvals/{approval[1]}", json={"approve": True}, headers=bearer).status_code == 401
+    assert client.post("/mcp/agents/block", json={"tool": "get_notes", "blocked": True}, headers=bearer).status_code == 401
+    assert client.post("/mcp/agents/revoke", json={"all": True}, headers=bearer).status_code == 401
+    assert client.get(f"/mcp/agents/approvals/{approval[1]}", headers={"cookie": cookie}).json()["status"] == "pending"
+    assert sql("SELECT 1 FROM mcp_blocked") == []
+    assert rpc(token, "tools/list").status_code == 200
+
+
+class _Fake(http.server.BaseHTTPRequestHandler):
+    """A fake agent.cloud: the gate's public key, and the answer to each recheck."""
+
+    jwks: dict[str, Any] = {}
+    users = (200, {"user": {"role": "member"}})
+    people = 200
+    asked: list[str] = []
+
+    def do_GET(self) -> None:  # noqa: N802 - the standard library's name
+        if self.path == "/.well-known/jwks.json":
+            status, body = 200, self.jwks
+        elif self.path.startswith("/people?"):
+            self.asked.append(self.path)
+            status, body = self.people, {"user": {"role": "member"}}
+        elif self.path.startswith("/users/"):
+            status, body = self.users
+        else:
+            status, body = 500, {}
+        raw = json.dumps(body).encode()
+        self.send_response(status)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+@pytest.fixture
+def fake(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Fake)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    monkeypatch.setenv("AGC_AUTH_URL", origin)
+    monkeypatch.setenv("AGC_IDENTITY_ISSUER", origin)
+    try:
+        yield origin
+    finally:
+        server.shutdown()
+
+
+@needs_pg
+def test_amcp_6_7_a_recheck_that_returns_a_lower_role_takes_the_owners_controls_away(fake: str) -> None:
+    who = "00000000-0000-4000-8000-0000000000b3"
+    cookie = signed_in(who, "owner")
+
+    def block(blocked: bool) -> int:
+        return client.post("/mcp/agents/block", json={"tool": "get_me", "blocked": blocked}, headers={**SAME, "cookie": cookie}).status_code
+
+    assert block(True) == 200
+    assert block(False) == 200
+    token = connect(cookie)["access_token"]
+    sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", who)
+    assert rpc(token, "tools/list").status_code == 200  # still let in, as a member now
+    assert sql("SELECT role FROM users WHERE id = %s", who) == [{"role": "member"}]
+    assert block(True) == 403
+    assert client.get("/mcp/agents", headers={"cookie": cookie}).json()["owner"] is False
+
+
+# Edge sign-in (AMCP-6, AMCP-7): the gate's signed x-agc-identity names a grant by its issuer and provider_id.
+from cryptography.hazmat.primitives import hashes  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature  # noqa: E402
+
+from app import auth  # noqa: E402
+
+KEY, OTHER_KEY = ec.generate_private_key(ec.SECP256R1()), ec.generate_private_key(ec.SECP256R1())
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _jwk(key: ec.EllipticCurvePrivateKey) -> dict[str, str]:
+    n = key.public_key().public_numbers()
+    return {
+        "kty": "EC",
+        "crv": "P-256",
+        "x": _b64(n.x.to_bytes(32, "big")),
+        "y": _b64(n.y.to_bytes(32, "big")),
+        "kid": "k1",
+        "use": "sig",
+        "alg": "ES256",
+    }
+
+
+def assertion(iss: str, email: str, claims: dict[str, object] | None = None, key: ec.EllipticCurvePrivateKey = KEY) -> str:
+    import time
+    import uuid
+
+    now = int(time.time())
+    head = _b64(json.dumps({"alg": "ES256", "kid": "k1", "typ": "JWT"}).encode())
+    body = {
+        "iss": iss,
+        "sub": email,
+        "name": "",
+        "aud": "starter",
+        "presence": "session",
+        "jti": str(uuid.uuid4()),
+        "iat": now,
+        "exp": now + 300,
+    }
+    payload = _b64(json.dumps({**body, **(claims or {})}).encode())
+    r, s = decode_dss_signature(key.sign(f"{head}.{payload}".encode(), ec.ECDSA(hashes.SHA256())))
+    return f"{head}.{payload}.{_b64(r.to_bytes(32, 'big') + s.to_bytes(32, 'big'))}"
+
+
+@pytest.fixture
+def edge(fake: str, monkeypatch: pytest.MonkeyPatch) -> str:
+    monkeypatch.setattr(auth, "EDGE", True)
+    _Fake.jwks = {"keys": [_jwk(KEY)]}
+    return fake
+
+
+def gate(issuer: str, email: str, provider_id: str | None, role: str = "member", **claims: object) -> dict[str, str]:
+    """What the gate puts on a signed-in person's request: who they are, signed, and their role."""
+    extra = {**({"provider_id": provider_id} if provider_id is not None else {}), **claims}
+    return {"x-agc-user-email": email, "x-agc-user-role": role, "x-agc-identity": assertion(issuer, email, extra)}
+
+
+def authorize(headers: dict[str, str]) -> tuple[Any, str, str]:
+    import base64
+
+    reg = client.post("/oauth/register", json={"redirect_uris": ["http://127.0.0.1:43210/cb"], "client_name": "Claude"})
+    client_id = reg.json()["client_id"]
+    verifier = secrets.token_urlsafe(32)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    q = {
+        "response_type": "code",
+        "client_id": client_id,
+        "redirect_uri": "http://127.0.0.1:43210/cb",
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+        "state": "s",
+    }
+    return client.get(f"/oauth/authorize?{urlencode(q)}", headers=headers, follow_redirects=False), client_id, verifier
+
+
+def edge_connect(headers: dict[str, str]) -> str:
+    res, client_id, verifier = authorize(headers)
+    assert res.status_code == 302, res.text
+    request = parse_qs(urlsplit(res.headers["location"]).query)["request"][0]
+    decided = client.post("/mcp/agents/consent", json={"request": request, "allow": True, "scope": "act"}, headers={**headers, **SAME})
+    assert decided.status_code == 200, decided.text
+    code = parse_qs(urlsplit(decided.json()["redirect"]).query)["code"][0]
+    body = {
+        "grant_type": "authorization_code",
+        "code": code,
+        "client_id": client_id,
+        "redirect_uri": "http://127.0.0.1:43210/cb",
+        "code_verifier": verifier,
+    }
+    tok = form("/oauth/token", body)
+    assert tok.status_code == 200, tok.text
+    return tok.json()["access_token"]
+
+
+@needs_pg
+def test_amcp_7_the_same_email_with_a_different_provider_id_is_a_different_person(edge: str) -> None:
+    a, b = gate(edge, "sam@edge.test", "provider-a"), gate(edge, "sam@edge.test", "provider-b")
+    token = edge_connect(a)
+    g = sql("SELECT id::text AS id, subject_iss, subject_id FROM mcp_grants WHERE subject_id = 'provider-a'")[0]
+    assert [g["subject_iss"], g["subject_id"]] == [edge, "provider-a"]  # never the email
+    assert [len(client.get("/mcp/agents", headers=h).json()["connections"]) for h in (a, b)] == [1, 0]
+    assert client.post("/mcp/agents/revoke", json={"id": g["id"]}, headers={**b, **SAME}).json()["revoked"] == 0
+    note = sql(
+        "INSERT INTO notes (user_id, title) SELECT id, 'edge note' FROM users WHERE email = 'sam@edge.test' RETURNING id::text AS id"
+    )[0]["id"]
+    asked = call(token, "delete_notes_by_id", {"id": note})
+    approval = re.search(r"/agents/approve/([0-9a-f-]{36})", asked["content"][0]["text"])
+    assert approval
+    assert client.post(f"/mcp/agents/approvals/{approval[1]}", json={"approve": True}, headers={**b, **SAME}).status_code == 400
+    assert client.post(f"/mcp/agents/approvals/{approval[1]}", json={"approve": True}, headers={**a, **SAME}).status_code == 200
+
+
+@needs_pg
+def test_amcp_7_consent_needs_a_verified_assertion_from_agent_clouds_own_issuer_with_a_provider_id(edge: str) -> None:
+    import time
+
+    no_id, _, _ = authorize(gate(edge, "nid@edge.test", None))
+    assert no_id.status_code == 403
+    assert "stable id" in no_id.text
+    foreign, _, _ = authorize(gate(edge, "cust@edge.test", "p1", iss="https://login.customer.example"))
+    assert foreign.status_code == 403
+    assert foreign.text == "Agents aren’t available on this sign-in yet."
+    forged = {**gate(edge, "forge@edge.test", "p2"), "x-agc-identity": assertion(edge, "forge@edge.test", {"provider_id": "p2"}, OTHER_KEY)}
+    assert authorize(forged)[0].status_code == 403
+    assert authorize({**gate(edge, "x@edge.test", "p3"), "x-agc-user-email": "y@edge.test"})[0].status_code == 403
+    assert authorize(gate(edge, "old@edge.test", "p4", exp=int(time.time()) - 1))[0].status_code == 403
+
+
+@needs_pg
+def test_amcp_7_an_edge_grant_is_rechecked_by_its_issuer_and_provider_id_and_a_refusal_ends_it(edge: str) -> None:
+    token = edge_connect(gate(edge, "re@edge.test", "provider-r"))
+    sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE subject_id = 'provider-r'")
+    _Fake.people = 404
+    try:
+        assert rpc(token, "tools/list").status_code == 401
+    finally:
+        _Fake.people = 200
+    q = parse_qs(urlsplit(_Fake.asked[-1]).query)
+    assert [q["iss"], q["provider_id"]] == [[edge], ["provider-r"]]
+    assert "re%40edge" not in _Fake.asked[-1]
+
+
+@needs_pg
+def test_amcp_6_on_edge_sign_in_the_owner_is_the_gates_role_on_the_request_on_the_session_pages_only(edge: str) -> None:
+    body = {"tool": "get_me", "blocked": True}
+    assert client.post("/mcp/agents/block", json=body, headers={**gate(edge, "m@edge.test", "pm"), **SAME}).status_code == 403
+    assert client.post("/mcp/agents/block", json=body, headers={**gate(edge, "o@edge.test", "po", "owner"), **SAME}).status_code == 200
+    token = edge_connect(gate(edge, "t@edge.test", "pt"))
+    bearer = {**SAME, "x-agc-user-role": "owner", "authorization": f"Bearer {token}"}
+    assert client.post("/mcp/agents/block", json={"tool": "get_me", "blocked": False}, headers=bearer).status_code == 401
+    client.post(
+        "/mcp/agents/block", json={"tool": "get_me", "blocked": False}, headers={**gate(edge, "o@edge.test", "po", "owner"), **SAME}
+    )

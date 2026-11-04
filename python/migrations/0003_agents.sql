@@ -1,13 +1,18 @@
 -- SPEC.md AMCP-1 to AMCP-8: people's own agents, connected to the app over MCP. Only hashes of tokens are kept.
--- A person's role in the app's organization, from sign-in: 'owner' sees every connection and blocks tools (AMCP-6).
+-- A person's role in the app's organization, from sign-in and each recheck: on agent.cloud's sign-in, 'owner' sees
+-- every connection and blocks tools (AMCP-6). On edge sign-in the gate says it on each request instead.
 ALTER TABLE users ADD COLUMN role text;
 -- The agent a note was written through, when one was ("via Claude", AMCP-7).
 ALTER TABLE notes ADD COLUMN via text;
 
--- A person's yes to one agent: Read ('read') or Read and act ('act'), for 30 days at most (AMCP-2).
+-- A person's yes to one agent: Read ('read') or Read and act ('act'), for 30 days at most (AMCP-2). Who said yes is a
+-- stable identity (AMCP-7): on agent.cloud's sign-in ('agent.cloud', the app user's id); on edge sign-in, the gate's
+-- signed issuer and provider_id, never an email alone. user_id is the app's own row for them, which tool calls act as.
 CREATE TABLE mcp_grants (
   id          uuid PRIMARY KEY,
   user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  subject_iss text NOT NULL,
+  subject_id  text NOT NULL,
   client_id   text NOT NULL,
   client_name text NOT NULL,
   scope       text NOT NULL CHECK (scope IN ('read', 'act')),
@@ -18,6 +23,7 @@ CREATE TABLE mcp_grants (
   checked_at  timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX mcp_grants_user ON mcp_grants (user_id);
+CREATE INDEX mcp_grants_subject ON mcp_grants (subject_iss, subject_id);
 CREATE INDEX mcp_grants_expiry ON mcp_grants (expires_at);
 
 -- Refresh tokens rotate: each is used once, and a second use revokes its grant.
@@ -72,9 +78,11 @@ CREATE TABLE mcp_blocked (
   at         timestamptz NOT NULL DEFAULT now()
 );
 
--- What each person last pointed at for their agent, kept 10 minutes (AMCP-8).
+-- What each person last pointed at for their agent, kept 10 minutes (AMCP-8), by the same identity a grant names.
 CREATE TABLE mcp_points (
-  user_id uuid PRIMARY KEY REFERENCES users (id) ON DELETE CASCADE,
-  pick    jsonb NOT NULL,
-  at      timestamptz NOT NULL DEFAULT now()
+  subject_iss text NOT NULL,
+  subject_id  text NOT NULL,
+  pick        jsonb NOT NULL,
+  at          timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (subject_iss, subject_id)
 );

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
@@ -16,11 +17,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from psycopg.types.json import Jsonb
 
-from .. import log
+from .. import auth, log
 from ..auth import current_user, via_of
 from ..db import pool
+from .app_name import APP_NAME
+from .identity import Subject, identity_of
 from .oauth import client_of, consent_of, decide, js_time, origin_of, resource_of
-from .server import APP_NAME
 from .tools import catalog
 
 # AMCP-13 (agent.cloud): whether agent.cloud lets agents reach this app, and whether that's the organization's setting
@@ -48,13 +50,33 @@ def access_of() -> dict[str, Any]:
     return value
 
 
-def person(request: Request) -> dict[str, Any] | None:
-    """The signed-in person, never an agent's call."""
-    return None if via_of(request) else current_user(request)
+@dataclass(frozen=True)
+class Person:
+    user: dict[str, Any]
+    subject: Subject | None
+    refusal: str | None
+    owner: bool
 
 
-def _owner(user: dict[str, Any]) -> bool:
-    return user.get("role") == "owner"
+def person(request: Request) -> Person | None:
+    """The signed-in person, never an agent's call (a Bearer token is never a session, and a tool call carries via). Their
+    stable identity (AMCP-7) names their grants. AMCP-6: an owner is, on agent.cloud's sign-in, the role from the last
+    sign-in or recheck; on edge sign-in, the gate's x-agc-user-role on this very request, which the edge empties from
+    clients (ROLE-4). Only these session pages read it, never a tool call."""
+    user = None if via_of(request) else current_user(request)
+    if not user:
+        return None
+    who = identity_of(request, user)
+    owner = request.headers.get("x-agc-user-role") == "owner" if auth.EDGE else user.get("role") == "owner"
+    return Person(user, who.subject, who.message, owner)
+
+
+def _mine(p: Person) -> tuple[str | None, str | None]:
+    return (p.subject.iss, p.subject.id) if p.subject else (None, None)
+
+
+def _not_here(p: Person) -> Response:
+    return JSONResponse({"error": {"code": "not_available", "message": p.refusal}}, 403)
 
 
 def _nope() -> Response:
@@ -83,16 +105,18 @@ def mount_agents(app: FastAPI) -> None:
 
     @app.get("/mcp/agents", include_in_schema=False)
     def agents(request: Request) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
-        everyone = _owner(user)
+        everyone = me.owner
+        si, sp = _mine(me)
         with pool.connection() as conn:
             grants = conn.execute(
-                "SELECT g.id::text AS id, g.user_id::text AS user_id, g.client_name, g.scope, g.created_at, u.email, u.name"
-                " FROM mcp_grants g JOIN users u ON u.id = g.user_id"
-                " WHERE g.revoked_at IS NULL AND g.expires_at > now() AND (%s OR g.user_id = %s) ORDER BY g.created_at DESC LIMIT 200",
-                (everyone, user["id"]),
+                "SELECT g.id::text AS id, (g.subject_iss = %s AND g.subject_id = %s) IS TRUE AS mine, g.client_name, g.scope, g.created_at,"
+                " u.email, u.name FROM mcp_grants g JOIN users u ON u.id = g.user_id"
+                " WHERE g.revoked_at IS NULL AND g.expires_at > now() AND (%s OR (g.subject_iss = %s AND g.subject_id = %s))"
+                " ORDER BY g.created_at DESC LIMIT 200",
+                (si, sp, everyone, si, sp),
             ).fetchall()
             calls = conn.execute(
                 "SELECT grant_id::text AS grant_id, tool, status, at FROM"
@@ -109,19 +133,16 @@ def mount_agents(app: FastAPI) -> None:
                 "scope": g["scope"],
                 "connected_at": js_time(g["created_at"]),
                 "person": g["email"] if g["email"] is not None else g["name"],
-                "mine": g["user_id"] == user["id"],
+                "mine": g["mine"],
                 "calls": [{"tool": c["tool"], "status": c["status"], "at": js_time(c["at"])} for c in calls if c["grant_id"] == g["id"]],
             }
 
-        out: dict[str, Any] = {
-            "app": APP_NAME,
-            "mcp_url": resource_of(request),
-            "owner": everyone,
-            "access": access_of(),
-            "connections": [view(g) for g in grants if g["user_id"] == user["id"]],
-        }
+        out: dict[str, Any] = {"app": APP_NAME, "mcp_url": resource_of(request), "owner": everyone, "access": access_of()}
+        if me.refusal:
+            out["refusal"] = me.refusal
+        out["connections"] = [view(g) for g in grants if g["mine"]]
         if everyone:
-            out["everyone"] = [view(g) for g in grants if g["user_id"] != user["id"]]
+            out["everyone"] = [view(g) for g in grants if not g["mine"]]
             out["tools"] = [
                 {"name": t["name"], "summary": t["summary"], "method": t["method"], "path": t["path"], "blocked": t["name"] in off}
                 for t in catalog(app)["tools"]
@@ -135,25 +156,26 @@ def mount_agents(app: FastAPI) -> None:
         return await anyio.to_thread.run_sync(_revoke, request, m if isinstance(m, dict) else {})
 
     def _revoke(request: Request, m: dict[str, Any]) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
         if m.get("all") is True:
-            if not _owner(user):
-                return _bad("forbidden", "Only an owner can revoke everyone’s agents.", 403)
+            if not me.owner:
+                return _bad("forbidden", "Only an owner can revoke everyone\u2019s agents.", 403)
             with pool.connection() as conn:
                 n = conn.execute("UPDATE mcp_grants SET revoked_at = now() WHERE revoked_at IS NULL").rowcount
-            log.info("every agent connection revoked", by=user["id"], connections=n)
+            log.info("every agent connection revoked", by=me.user["id"], connections=n)
             return JSONResponse({"revoked": n})
         grant = m.get("id")
         if not isinstance(grant, str) or not _UUID.match(grant):
             return _bad("bad_request", "Name the connection.")
         with pool.connection() as conn:
             n = conn.execute(
-                "UPDATE mcp_grants SET revoked_at = now() WHERE id = %s AND revoked_at IS NULL AND (%s OR user_id = %s)",
-                (grant, _owner(user), user["id"]),
+                "UPDATE mcp_grants SET revoked_at = now() WHERE id = %s AND revoked_at IS NULL"
+                " AND (%s OR (subject_iss = %s AND subject_id = %s))",
+                (grant, me.owner, *_mine(me)),
             ).rowcount
-        log.info("agent connection revoked", by=user["id"], connection=grant, revoked=n)
+        log.info("agent connection revoked", by=me.user["id"], connection=grant, revoked=n)
         return JSONResponse({"revoked": n})
 
     @app.post("/mcp/agents/block", include_in_schema=False)
@@ -163,29 +185,33 @@ def mount_agents(app: FastAPI) -> None:
         return await anyio.to_thread.run_sync(_block, request, m if isinstance(m, dict) else {})
 
     def _block(request: Request, m: dict[str, Any]) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
-        if not _owner(user):
+        if not me.owner:
             return _bad("forbidden", "Only an owner can block tools.", 403)
         tool, blocked = m.get("tool"), m.get("blocked")
         if not isinstance(tool, str) or not any(t["name"] == tool for t in catalog(app)["tools"]) or not isinstance(blocked, bool):
-            return _bad("bad_request", "Name a tool, and whether it’s blocked.")
+            return _bad("bad_request", "Name a tool, and whether it\u2019s blocked.")
         with pool.connection() as conn:
             if blocked:
-                conn.execute("INSERT INTO mcp_blocked (tool, blocked_by) VALUES (%s, %s) ON CONFLICT (tool) DO NOTHING", (tool, user["id"]))
+                conn.execute(
+                    "INSERT INTO mcp_blocked (tool, blocked_by) VALUES (%s, %s) ON CONFLICT (tool) DO NOTHING", (tool, me.user["id"])
+                )
             else:
                 conn.execute("DELETE FROM mcp_blocked WHERE tool = %s", (tool,))
-        log.info("tool blocked for agents" if blocked else "tool unblocked for agents", by=user["id"], tool=tool)
+        log.info("tool blocked for agents" if blocked else "tool unblocked for agents", by=me.user["id"], tool=tool)
         return JSONResponse({"tool": tool, "blocked": blocked})
 
     @app.get("/mcp/agents/consent", include_in_schema=False)
     def consent_get(request: Request) -> Response:
         """The consent page (AMCP-2): what's asking."""
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
-        q = consent_of(request.query_params.get("request"), user, resource_of(request))
+        if not me.subject:
+            return _not_here(me)
+        q = consent_of(request.query_params.get("request"), me.user, me.subject, resource_of(request))
         if not q:
             return _bad("expired", "This request has expired. Start again from your agent.")
         client = client_of(q["cl"])
@@ -194,7 +220,7 @@ def mount_agents(app: FastAPI) -> None:
                 "app": APP_NAME,
                 "client": client["n"] if client else "An unnamed client",
                 "callback": urlsplit(q["r"]).netloc,
-                "signed_in_as": user.get("email") if user.get("email") is not None else user.get("name"),
+                "signed_in_as": me.user.get("email") if me.user.get("email") is not None else me.user.get("name"),
                 "expires_at": js_time(datetime.fromtimestamp(q["e"] / 1000, UTC)),
             }
         )
@@ -206,10 +232,12 @@ def mount_agents(app: FastAPI) -> None:
         return await anyio.to_thread.run_sync(_consent, request, m if isinstance(m, dict) else {})
 
     def _consent(request: Request, m: dict[str, Any]) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
-        q = consent_of(m.get("request"), user, resource_of(request))
+        if not me.subject:
+            return _not_here(me)
+        q = consent_of(m.get("request"), me.user, me.subject, resource_of(request))
         scope = m.get("scope")
         redirect = decide(q, m.get("allow") is True, scope, origin_of(request)) if q and scope in ("read", "act") else None
         if not redirect or not q:
@@ -217,28 +245,28 @@ def mount_agents(app: FastAPI) -> None:
         client = client_of(q["cl"])
         log.info(
             "agent consent given" if m.get("allow") is True else "agent consent refused",
-            user=user["id"],
+            user=me.user["id"],
             client=client["n"] if client else None,
             scope=scope,
         )
         return JSONResponse({"redirect": redirect})
 
-    def _approval(approval: str, user_id: str) -> dict[str, Any] | None:
+    def _approval(approval: str, me: Person) -> dict[str, Any] | None:
         with pool.connection() as conn:
             return conn.execute(
                 "SELECT a.id::text AS id, a.tool, a.args, a.status, a.expires_at, g.client_name"
                 " FROM mcp_approvals a JOIN mcp_grants g ON g.id = a.grant_id"
-                " WHERE a.id = %s AND g.user_id = %s AND g.revoked_at IS NULL",
-                (approval, user_id),
+                " WHERE a.id = %s AND g.subject_iss = %s AND g.subject_id = %s AND g.revoked_at IS NULL",
+                (approval, *_mine(me)),
             ).fetchone()
 
     @app.get("/mcp/agents/approvals/{approval}", include_in_schema=False)
     def approval_get(request: Request, approval: str) -> Response:
         """An agent's destructive call, waiting for its person (AMCP-5)."""
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
-        a = _approval(approval, user["id"]) if _UUID.match(approval) else None
+        a = _approval(approval, me) if _UUID.match(approval) else None
         if not a:
             return _bad("not_found", "No such request.", 404)
         tool = next((t for t in catalog(app)["tools"] if t["name"] == a["tool"]), None)
@@ -262,21 +290,22 @@ def mount_agents(app: FastAPI) -> None:
         return await anyio.to_thread.run_sync(_decide_approval, request, approval, m if isinstance(m, dict) else {})
 
     def _decide_approval(request: Request, approval: str, m: dict[str, Any]) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
         approve = m.get("approve")
         if not isinstance(approve, bool) or not _UUID.match(approval):
             return _bad("bad_request", "Approve or deny.")
         with pool.connection() as conn:
             row = conn.execute(
-                "UPDATE mcp_approvals a SET status = %s FROM mcp_grants g WHERE a.id = %s AND g.id = a.grant_id AND g.user_id = %s"
+                "UPDATE mcp_approvals a SET status = %s FROM mcp_grants g WHERE a.id = %s AND g.id = a.grant_id"
+                " AND g.subject_iss = %s AND g.subject_id = %s"
                 " AND g.revoked_at IS NULL AND a.status = 'pending' AND a.expires_at > now() RETURNING a.tool",
-                ("approved" if approve else "denied", approval, user["id"]),
+                ("approved" if approve else "denied", approval, *_mine(me)),
             ).fetchone()
         if not row:
             return _bad("expired", "This request was already answered, or has expired.")
-        log.info("agent call approved" if approve else "agent call denied", user=user["id"], tool=row["tool"])
+        log.info("agent call approved" if approve else "agent call denied", user=me.user["id"], tool=row["tool"])
         return JSONResponse({"status": "approved" if approve else "denied"})
 
     @app.post("/mcp/agents/point", include_in_schema=False)
@@ -286,9 +315,11 @@ def mount_agents(app: FastAPI) -> None:
         return await anyio.to_thread.run_sync(_point, request, m)
 
     def _point(request: Request, m: Any) -> Response:
-        user = person(request)
-        if not user:
+        me = person(request)
+        if not me:
             return _nope()
+        if not me.subject:
+            return _not_here(me)
         ok = (
             isinstance(m, dict)
             and set(m) == {"route", "selector", "label"}
@@ -303,8 +334,8 @@ def mount_agents(app: FastAPI) -> None:
         pick = {"route": m["route"], "selector": m["selector"], "label": m["label"]}
         with pool.connection() as conn:
             conn.execute(
-                "INSERT INTO mcp_points (user_id, pick, at) VALUES (%s, %s, now())"
-                " ON CONFLICT (user_id) DO UPDATE SET pick = EXCLUDED.pick, at = now()",
-                (user["id"], Jsonb(pick)),
+                "INSERT INTO mcp_points (subject_iss, subject_id, pick, at) VALUES (%s, %s, %s, now())"
+                " ON CONFLICT (subject_iss, subject_id) DO UPDATE SET pick = EXCLUDED.pick, at = now()",
+                (me.subject.iss, me.subject.id, Jsonb(pick)),
             )
         return JSONResponse({"ok": True})
