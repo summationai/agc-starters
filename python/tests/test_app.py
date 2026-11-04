@@ -392,8 +392,53 @@ def test_auth_8_a_2xx_or_5xx_keeps_the_session_and_every_other_answer_ends_it(
     assert sent["method"] == "GET" and str(sent["url"]).endswith("/users/u1")
     assert sent["headers"] == {"authorization": "Bearer agca_test", "x-agc-session-start": "1700000000500"}
     assert sent["follow_redirects"] is False  # a redirect is the answer, never followed
-    assert read == []  # only the status: a slow body can't hold the session's requests
+    # Only a 2xx's body is read (for the role, AMCP-6), bounded; every other answer is its status alone.
+    assert read == (["iter_bytes"] if 200 <= status < 300 else [])
     assert ran == ([CLAIM, CHECKED] if kept else [CLAIM, DELETE])
+
+
+@pytest.mark.parametrize(
+    ("said", "stored"),
+    [
+        (b'{"user":{"id":"u1","role":"member"}}', "member"),
+        (b'{"user":{"id":"u1","role":"owner"}}', "owner"),
+        (b'{"user":{"id":"u1","role":null}}', None),
+    ],
+)
+def test_amcp_6_a_session_recheck_takes_the_role_agent_cloud_says(monkeypatch: pytest.MonkeyPatch, said: bytes, stored: str | None) -> None:
+    ran: list[tuple[str, tuple[object, ...]]] = []
+
+    class Conn:
+        def execute(self, sql: str, *args: object) -> SimpleNamespace:
+            ran.append((" ".join(sql.split()[:6]), args))
+            return SimpleNamespace(rowcount=1, fetchone=lambda: None)
+
+    @contextmanager
+    def connection() -> Iterator[Conn]:
+        yield Conn()
+
+    class Answer:
+        status_code = 200
+
+        def iter_bytes(self) -> list[bytes]:
+            return [said]
+
+    @contextmanager
+    def stream(method: str, url: str, **kwargs: object) -> Iterator[Answer]:
+        yield Answer()
+
+    monkeypatch.setattr(auth, "pool", SimpleNamespace(connection=connection))
+    monkeypatch.setattr(auth, "httpx", SimpleNamespace(stream=stream, HTTPError=httpx.HTTPError))
+    assert auth._still_let_in("due", "u1", 1700000000.5) is True
+    assert [r[0] for r in ran] == [CLAIM, CHECKED, "UPDATE users SET role = %s"]
+    assert ran[2][1] == ((stored, "u1"),)
+
+
+def test_amcp_6_a_recheck_that_names_no_role_leaves_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    ran = _pool(monkeypatch, True)
+    _control(monkeypatch, 200)  # an empty body: no role said
+    assert auth._still_let_in("due", "u1", 1700000000.5) is True
+    assert ran == [CLAIM, CHECKED]
 
 
 def test_auth_8_the_answer_detector_sees_a_body_read() -> None:

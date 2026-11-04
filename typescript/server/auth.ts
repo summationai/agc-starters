@@ -80,19 +80,24 @@ async function recheck(key: string, userId: string, started: number): Promise<bo
        AND coalesce(checked_at, expires_at - interval '1 day') <= now() - interval '5 minutes' AND checked_at IS DISTINCT FROM '-infinity'`, [key]);
   if (!rowCount) return settled(key); // another request or process is asking, or just answered
   let status: number | null = null;
+  let role: unknown; // AMCP-6: a 2xx's user.role, when it says one, replaces the stored role
   try {
     const res = await fetch(`${AGC_AUTH_URL}/users/${encodeURIComponent(userId)}`, {
       redirect: 'manual', signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${AGC_AUTH_TOKEN}`, 'x-agc-session-start': String(started) },
     });
     status = res.status;
-    await res.body?.cancel().catch(() => {});
+    if (status >= 200 && status < 300) {
+      const j = await res.json().catch(() => null) as { user?: unknown } | null;
+      if (j?.user && typeof j.user === 'object' && 'role' in j.user) role = (j.user as { role?: unknown }).role;
+    } else await res.body?.cancel().catch(() => {});
   } catch (e) {
     log.warn('session recheck unanswered, keeping the session', { user: userId, error: (e as Error).name });
   }
   if (status === null || status >= 500 || (status >= 200 && status < 300)) {
     if (status !== null && status >= 500) log.warn('session recheck unanswered, keeping the session', { user: userId, status });
     await pool.query('UPDATE sessions SET checked_at = now() WHERE token_hash = $1', [key]); // the next ask is 5 minutes on
+    if (role !== undefined) await pool.query('UPDATE users SET role = $2 WHERE id = $1', [userId, role === 'owner' || role === 'member' ? role : null]);
     return true;
   }
   // Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
@@ -151,7 +156,9 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
     const row = rows[0];
     // A session began a day before it expires (the callback makes each one last a day).
     const ended = row && (row.due || asking.has(key)) && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000));
-    if (row && !ended) c.set('user', { id: row.id, email: row.email, name: row.name, role: row.role });
+    // A recheck may have changed the role (AMCP-6), so a session that was due reads it again.
+    const role = row && !ended && row.due ? (await pool.query<{ role: string | null }>('SELECT role FROM users WHERE id = $1', [row.id])).rows[0]?.role ?? null : row?.role;
+    if (row && !ended) c.set('user', { id: row.id, email: row.email, name: row.name, role });
   }
   await next();
 };
