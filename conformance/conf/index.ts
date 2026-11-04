@@ -474,6 +474,11 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       set('CONF:invariants', (ok ? pass : fail)(results.join('; ') || 'no invariants'));
     }
 
+    // A note and its email job queued straight into the table, as work with no request behind it would be, so the
+    // workers own it: a request's own job the web process runs at once (JOB-5) and would take from them.
+    const queueNote = async (title: string): Promise<string> => (await env.sql<{ id: string }>(`WITH n AS (INSERT INTO notes (user_id, title) SELECT id, $1 FROM users WHERE email = $2 RETURNING id)
+        INSERT INTO jobs (kind, payload) SELECT 'note_email', jsonb_build_object('note_id', id::text) FROM n RETURNING payload->>'note_id' AS id`, [title, who]))[0]?.id ?? '';
+
     // JOB-2: two workers, a batch of notes, each job run exactly once.
     {
       const second = await env.worker('worker2');
@@ -481,9 +486,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       await sleep(3000);
       const ids: string[] = [];
       for (let i = 0; i < 20; i++) {
-        const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Race ${tag()} ${i}` });
-        const id = (r.json as { id?: string } | null)?.id;
-        if (r.status === 201 && id) ids.push(id);
+        const id = await queueNote(`Race ${tag()} ${i}`);
+        if (id) ids.push(id);
       }
       const all = await until(45_000, async () => {
         const m = await env.mail();
@@ -499,9 +503,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     {
       const ids: string[] = [];
       for (let i = 0; i < 5; i++) {
-        const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Crash ${tag()} ${i}` });
-        const id = (r.json as { id?: string } | null)?.id;
-        if (r.status === 201 && id) ids.push(id);
+        const id = await queueNote(`Crash ${tag()} ${i}`);
+        if (id) ids.push(id);
       }
       await sleep(150);
       await env.kill(worker);
@@ -532,9 +535,7 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const gaps = idle.slice(1).map((t, i) => (t - idle[i]!) / 1000);
       // A job only the worker runs: queued straight into the table, as one with no request behind it would be. A
       // request's own job the web process runs at once (JOB-5), so it wouldn't bring the worker back.
-      const queued = await env.sql<{ id: string }>(`WITH n AS (INSERT INTO notes (user_id, title) SELECT id, $1 FROM users WHERE email = $2 RETURNING id)
-        INSERT INTO jobs (kind, payload) SELECT 'note_email', jsonb_build_object('note_id', id::text) FROM n RETURNING payload->>'note_id' AS id`, [`Idle ${tag()}`, who]);
-      const id = queued[0]?.id ?? '';
+      const id = await queueNote(`Idle ${tag()}`);
       const t0 = Date.now();
       const got = await until(15_000, async () => ((await env.mail()).some((m) => m.key === `note-${id}/created`) ? Date.now() : undefined), 200);
       await sleep(2000);
