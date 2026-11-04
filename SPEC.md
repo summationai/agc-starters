@@ -83,14 +83,21 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **AUTH-6:** No passwords. No password hashing (bcrypt, scrypt, argon2, PBKDF2) anywhere near the word "password" (`agc ship` warns on it). `LINT:no-passwords`
 
 ### Email (`docs/AGENTS.md` "Background work")
-- **MAIL-1:** Email is sent by the worker, never in the request: `POST $AGC_EMAIL_URL` with `Authorization: Bearer $AGC_EMAIL_TOKEN` and `{to, subject, text, key}`. `CONF:mail`
+- **MAIL-1:** Email is sent by a job, never inside a request's response: by the worker, or by the web process just after it has answered (JOB-5): `POST $AGC_EMAIL_URL` with `Authorization: Bearer $AGC_EMAIL_TOKEN` and `{to, subject, text, key}`. `CONF:mail`
 - **MAIL-2:** `key` names the message for good (`note-<uuid>/created`), so a retried job never emails twice. `CONF:mail-once` (a worker killed mid-job: each key arrives once)
 
 ### Background jobs
 - **JOB-1:** A `jobs` table, created by a migration, with the columns in `docs/AGENTS.md`. Work is inserted in the same transaction as the write it belongs to. `LINT:migrations`, `review`
 - **JOB-2:** The worker claims with a lease (`FOR UPDATE SKIP LOCKED`, `locked_until`), so two workers never run one job at the same time, and a dead worker's job runs again. `CONF:jobs-race` (two workers, a batch of jobs, each email key exactly once)
 - **JOB-3:** Every job is safe to run twice. `CONF:mail-once`
-- **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. The trade-off is deliberate: the first email after a quiet spell can take up to ten minutes. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
+- **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. On its own, that would make the first email after a quiet spell wait up to ten minutes; JOB-5 runs a request's own job at once instead, and the worker's idle poll is the backstop. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
+
+- **JOB-5:** A job a request queues runs at once, not at the worker's next poll (agentcloud-apps/agc-feedback#316: everleaf's first email after a quiet spell took 391 s).
+  - After the web process has sent its response, it claims the job it just committed, with JOB-2's lease, and runs it with the worker's own handler. So the person's request never waits on the job, and the database is only woken by work that's there.
+  - If that run can't finish (the process stops, the lease is already held, or the job fails), the job stays queued and the worker runs it at its next poll, as JOB-4 says. Each job runs at most once at a time and is safe to run twice (JOB-2, JOB-3), so a run in both places sends each email key once (MAIL-2).
+  - The web process never polls, never listens and holds no connection once the run ends, so JOB-4's sleeping database still holds.
+
+  `review` until the build adds its conformance check: with a 600 s idle ceiling, a note's email arrives within 5 s of its POST; and with the web process stopped right after it answers, the worker sends that email once.
 
 ### Storage (`docs/specs/app-storage.md`: STO-3, STO-6, STO-12; `agc help storage`)
 Files people upload go to the app's bucket through signed URLs, never through the server or into Postgres. Each starter carries the helper an app calls once its `agentcloud.toml` declares `[storage]`; the starter itself declares none. STOR-1 through STOR-7 are proven by the stack's own tests against a fake S3 endpoint with fake keys, which `conformance.toml` names (`[storage] test`, §12) and `CONF:storage` runs. STOR-8 is a documentation review.
