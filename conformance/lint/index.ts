@@ -192,7 +192,9 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const text = read(s, 'AGENTS.md');
     if (text.includes('# agent.cloud: how to work on this app')) return fail('AGENTS.md carries agc\u2019s own section; agc init appends it');
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
-    if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-4)');
+    if (!text.includes('agc now "')) return fail('AGENTS.md doesn\u2019t ask the agent to say each step with agc now (DOC-4)');
+    if (!/^- \*\*A foreign key:\*\* index it\b.*`unindexed-fk`/m.test(text)) return fail('AGENTS.md doesn\u2019t say to index every foreign key, naming unindexed-fk (DOC-5)');
+    if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
