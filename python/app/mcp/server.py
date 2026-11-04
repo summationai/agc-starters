@@ -8,7 +8,10 @@ import json
 import os
 import re
 import secrets
+import threading
+import time
 import uuid
+from concurrent.futures import Future
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -98,17 +101,50 @@ def _compact(v: Any) -> str:
     return json.dumps(v, separators=(",", ":"), ensure_ascii=False)
 
 
+# One recheck per grant at a time, as AUTH-8 does for sessions: it's claimed by setting checked_at to 'infinity', which lets
+# no one in until an answer that keeps it is written. Calls in this process (each in its own worker thread) share the one
+# under way; a call in another process waits for the answer to be written (_settled). Whichever path lets a call through,
+# the call runs with the role the database holds after it, so the call that sees a demotion already runs demoted.
+_rechecking: dict[str, Future[bool]] = {}  # grant id → the recheck (or the wait) under way in this process
+_rechecking_lock = threading.Lock()
+_WAIT_S, _POLL_S = 6.0, 0.1
+
+
 def _still_let_in(g: dict[str, Any]) -> bool:
     """AMCP-7: a grant is rechecked with agent.cloud as a session is (AUTH-8): at most once every 5 minutes. On
     agent.cloud's sign-in it asks about the app user (GET /users/<id>); on edge sign-in, about the gate's issuer and
     provider_id (GET /people, agent.cloud's AMCP-15). Only a 2xx, or agent.cloud not answering, keeps it; a 2xx's role
     replaces the person's stored role, so a role taken away takes the owner's controls with it (AMCP-6)."""
+    with _rechecking_lock:
+        under = _rechecking.get(g["id"])
+        mine = under is None
+        if under is None:
+            under = Future()
+            _rechecking[g["id"]] = under
+    if mine:
+        try:
+            under.set_result(_claim_and_recheck(g))
+        except BaseException as e:
+            under.set_exception(e)
+        finally:
+            with _rechecking_lock:
+                _rechecking.pop(g["id"], None)
+    if not under.result():
+        return False
+    with pool.connection() as conn:
+        row = conn.execute("SELECT role FROM users WHERE id = %s", (g["user_id"],)).fetchone()
+    g["user"] = {**g["user"], "role": row["role"] if row else None}
+    return True
+
+
+def _claim_and_recheck(g: dict[str, Any]) -> bool:
     with pool.connection() as conn:
         claimed = conn.execute(
-            "UPDATE mcp_grants SET checked_at = now() WHERE id = %s AND checked_at <= now() - interval '5 minutes'", (g["id"],)
+            "UPDATE mcp_grants SET checked_at = 'infinity' WHERE id = %s AND checked_at <= now() - interval '5 minutes'",
+            (g["id"],),
         ).rowcount
     if not claimed:
-        return True
+        return _settled(g["id"])  # not due, or another process is asking
     base = os.environ["AGC_AUTH_URL"]
     if g["subject_iss"] == AGENT_CLOUD:
         url = f"{base}/users/{quote(g['user_id'], safe='')}"
@@ -133,20 +169,38 @@ def _still_let_in(g: dict[str, Any]) -> bool:
             except ValueError:
                 body = None
     except httpx.HTTPError:
-        pass  # agent.cloud didn't answer: keep it, and ask again in 5 minutes
-    if status is not None and 200 <= status < 300:
-        who = body.get("user", body) if isinstance(body, dict) else None
-        if isinstance(who, dict) and "role" in who:
-            role = who["role"] if who["role"] in ("owner", "member") else None
-            with pool.connection() as conn:
+        status, body = None, None  # agent.cloud didn't answer: keep it, and ask again in 5 minutes
+    if status is None or status >= 500 or 200 <= status < 300:
+        who = (body.get("user", body) if isinstance(body, dict) else None) if status is not None and status < 300 else None
+        with pool.connection() as conn:
+            if isinstance(who, dict) and "role" in who:
+                role = who["role"] if who["role"] in ("owner", "member") else None
                 conn.execute("UPDATE users SET role = %s WHERE id = %s", (role, g["user_id"]))
-        return True
-    if status is None or status >= 500:
+            conn.execute("UPDATE mcp_grants SET checked_at = now() WHERE id = %s", (g["id"],))
         return True
     with pool.connection() as conn:
-        conn.execute("UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()) WHERE id = %s", (g["id"],))
+        conn.execute("UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now() WHERE id = %s", (g["id"],))
     log.info("agent connection ended: agent.cloud no longer lets this person in", user=g["user_id"], status=status)
     return False
+
+
+def _settled(grant_id: str) -> bool:
+    """A grant another process is rechecking: wait for its answer to be written, then go by it. Still pending after
+    _WAIT_S, the call is refused, as AUTH-8 refuses a session under recheck."""
+    until = time.monotonic() + _WAIT_S
+    while True:
+        with pool.connection() as conn:
+            r = conn.execute(
+                "SELECT revoked_at IS NOT NULL AS revoked, checked_at = 'infinity' AS pending FROM mcp_grants WHERE id = %s",
+                (grant_id,),
+            ).fetchone()
+        if not r or r["revoked"]:
+            return False
+        if not r["pending"]:
+            return True
+        if time.monotonic() >= until:
+            return False
+        time.sleep(_POLL_S)
 
 
 def _blocked() -> set[str]:

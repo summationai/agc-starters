@@ -10,7 +10,9 @@ import re
 import secrets
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, LiteralString
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -463,6 +465,71 @@ def test_amcp_6_7_a_recheck_that_returns_a_lower_role_takes_the_owners_controls_
     assert sql("SELECT role FROM users WHERE id = %s", who) == [{"role": "member"}]
     assert block(True) == 403
     assert client.get("/mcp/agents", headers={"cookie": cookie}).json()["owner"] is False
+
+
+class _SlowDemoter(http.server.BaseHTTPRequestHandler):
+    """A fake agent.cloud whose recheck demotes to member, slowly, and counts how often it's asked."""
+
+    asked = 0
+
+    def do_GET(self) -> None:  # noqa: N802 - the standard library's name
+        if not self.path.startswith("/users/"):
+            self.send_response(500)
+            self.end_headers()
+            return
+        type(self).asked += 1
+        time.sleep(0.2)
+        raw = json.dumps({"user": {"id": self.path[7:], "role": "member"}}).encode()
+        self.send_response(200)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+def _role_of(result: dict[str, Any]) -> str | None:
+    return json.loads(result["content"][0]["text"].split("\n")[1])["user"]["role"]
+
+
+@needs_pg
+def test_amcp_6_7_the_call_that_sees_a_demotion_runs_demoted_concurrent_calls_share_one_recheck_a_stuck_one_lets_no_one_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowDemoter)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AGC_AUTH_URL", f"http://127.0.0.1:{server.server_port}")
+    sql("DELETE FROM mcp_registrations")  # three connections here; the other tests' budget of 20 an hour stays theirs
+    try:
+        # The very call whose recheck demotes the owner runs as a member.
+        who = "00000000-0000-4000-8000-0000000000b4"
+        token = connect(signed_in(who, "owner"))["access_token"]
+        assert _role_of(call(token, "get_me")) == "owner"  # not due: the stored role
+        sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", who)
+        _SlowDemoter.asked = 0
+        assert _role_of(call(token, "get_me")) == "member"  # the recheck that demotes is the call's own
+        assert _SlowDemoter.asked == 1
+        # Two calls at once, both due: agent.cloud is asked once, and both run with the role it gave.
+        both = "00000000-0000-4000-8000-0000000000b5"
+        t2 = connect(signed_in(both, "owner"))["access_token"]
+        sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", both)
+        _SlowDemoter.asked = 0
+        with ThreadPoolExecutor(2) as pool_:
+            a, b = pool_.map(lambda _: call(t2, "get_me"), range(2))
+        assert _SlowDemoter.asked == 1  # one recheck for the grant
+        assert [_role_of(a), _role_of(b)] == ["member", "member"]
+        # A recheck another process claimed and never answered: no one is let in once the wait runs out.
+        stuck = "00000000-0000-4000-8000-0000000000b6"
+        t3 = connect(signed_in(stuck))["access_token"]
+        sql("UPDATE mcp_grants SET checked_at = 'infinity' WHERE user_id = %s", stuck)
+        started = time.monotonic()
+        assert rpc(t3, "tools/list").status_code == 401
+        assert time.monotonic() - started >= 5.5  # it waited for the other process first
+    finally:
+        server.shutdown()
+        sql("DELETE FROM mcp_registrations")
 
 
 # Edge sign-in (AMCP-6, AMCP-7): the gate's signed x-agc-identity names a grant by its issuer and provider_id.

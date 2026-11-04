@@ -185,7 +185,8 @@ def grant_of(bearer: str, resource: str) -> dict[str, Any] | None:
         return None
     with pool.connection() as conn:
         g = conn.execute(
-            "SELECT g.*, g.id::text AS id, g.user_id::text AS user_id, u.email, u.name, u.role FROM mcp_grants g"
+            "SELECT g.id::text AS id, g.user_id::text AS user_id, g.subject_iss, g.subject_id, g.client_id, g.client_name,"
+            " g.scope, g.resource, g.created_at, g.expires_at, g.revoked_at, u.email, u.name, u.role FROM mcp_grants g"
             " JOIN users u ON u.id = g.user_id"
             " WHERE g.id = %s AND g.user_id = %s AND g.resource = %s AND g.revoked_at IS NULL AND g.expires_at > now()",
             (t["g"], t["u"], resource),
@@ -511,7 +512,9 @@ def decide(q: dict[str, Any], allow: bool, scope: str, origin: str) -> str | Non
 def _refresh_grant(token: str, client: str, res: str) -> dict[str, Any] | None:
     with tx() as conn:
         g = conn.execute(
-            "SELECT g.*, r.used_at FROM mcp_refresh r JOIN mcp_grants g ON g.id = r.grant_id WHERE r.token_hash = %s FOR UPDATE OF g, r",
+            "SELECT g.id, g.user_id, g.subject_iss, g.subject_id, g.client_id, g.client_name, g.scope, g.resource,"
+            " g.created_at, g.expires_at, g.revoked_at, r.used_at FROM mcp_refresh r JOIN mcp_grants g ON g.id = r.grant_id"
+            " WHERE r.token_hash = %s FOR UPDATE OF g, r",
             (_hash(token),),
         ).fetchone()
         if not g or g["client_id"] != client or g["resource"] != res or g["revoked_at"] or g["expires_at"].timestamp() * 1000 <= now_ms():

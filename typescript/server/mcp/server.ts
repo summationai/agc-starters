@@ -42,9 +42,28 @@ type LiveGrant = Grant & { user: { id: string; email: string | null; name: strin
 // sign-in it asks about the app user (GET /users/<id>); on edge sign-in, about the gate's issuer and provider_id
 // (GET /people, agent.cloud's AMCP-15). Only a 2xx, or agent.cloud not answering, keeps it; a 2xx's role replaces the
 // person's stored role, so a role taken away takes the owner's controls with it (AMCP-6).
+// One recheck per grant at a time, as AUTH-8 does for sessions: it's claimed by setting checked_at to 'infinity', which lets
+// no one in until an answer that keeps it is written. Calls in this process share the one under way; a call in another
+// process waits for the answer to be written (settled). Whichever path lets a call through, the call runs with the role the
+// database holds after it, so the call that sees a demotion already runs demoted.
+const rechecking = new Map<string, Promise<boolean>>(); // grant id → the recheck (or the wait) under way in this process
+const WAIT_MS = 6_000, POLL_MS = 100;
+
 async function stillLetIn(g: LiveGrant): Promise<boolean> {
-  const { rowCount } = await pool.query("UPDATE mcp_grants SET checked_at = now() WHERE id = $1 AND checked_at <= now() - interval '5 minutes'", [g.id]);
-  if (!rowCount) return true;
+  let under = rechecking.get(g.id);
+  if (!under) {
+    under = claimAndRecheck(g).finally(() => rechecking.delete(g.id));
+    rechecking.set(g.id, under);
+  }
+  if (!(await under)) return false;
+  const { rows: [u] } = await pool.query<{ role: string | null }>('SELECT role FROM users WHERE id = $1', [g.user_id]);
+  g.user = { ...g.user, role: u?.role ?? null };
+  return true;
+}
+
+async function claimAndRecheck(g: LiveGrant): Promise<boolean> {
+  const { rowCount } = await pool.query("UPDATE mcp_grants SET checked_at = 'infinity' WHERE id = $1 AND checked_at <= now() - interval '5 minutes'", [g.id]);
+  if (!rowCount) return settled(g.id); // not due, or another process is asking
   const url = g.subject_iss === AGENT_CLOUD
     ? `${process.env.AGC_AUTH_URL}/users/${encodeURIComponent(g.user_id)}`
     : `${process.env.AGC_AUTH_URL}/people?${new URLSearchParams({ iss: g.subject_iss, provider_id: g.subject_id })}`;
@@ -58,18 +77,32 @@ async function stillLetIn(g: LiveGrant): Promise<boolean> {
     status = res.status;
     body = res.ok ? await res.json().catch(() => null) : null;
     if (!res.ok) await res.body?.cancel().catch(() => {});
-  } catch { /* agent.cloud didn't answer: keep it, and ask again in 5 minutes */ }
-  if (status !== null && status >= 200 && status < 300) {
-    const who = body && typeof body === 'object' ? ((body as { user?: unknown }).user ?? body) as { role?: unknown } : null;
+  } catch { status = null; body = null; /* agent.cloud didn't answer: keep it, and ask again in 5 minutes */ }
+  if (status === null || status >= 500 || (status >= 200 && status < 300)) {
+    const who = status !== null && status < 300 && body && typeof body === 'object' ? ((body as { user?: unknown }).user ?? body) as { role?: unknown } : null;
     if (who && typeof who === 'object' && 'role' in who) {
       await pool.query('UPDATE users SET role = $2 WHERE id = $1', [g.user_id, who.role === 'owner' || who.role === 'member' ? who.role : null]);
     }
+    await pool.query('UPDATE mcp_grants SET checked_at = now() WHERE id = $1', [g.id]);
     return true;
   }
-  if (status === null || status >= 500) return true;
-  await pool.query('UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1', [g.id]);
+  await pool.query('UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()), checked_at = now() WHERE id = $1', [g.id]);
   log.info('agent connection ended: agent.cloud no longer lets this person in', { user: g.user_id, status });
   return false;
+}
+
+// A grant another process is rechecking: wait for its answer to be written, then go by it. Still pending after WAIT_MS, the
+// call is refused, as AUTH-8 refuses a session under recheck: no one is let in until an answer that keeps it is written.
+async function settled(id: string): Promise<boolean> {
+  const until = Date.now() + WAIT_MS;
+  for (;;) {
+    const { rows: [r] } = await pool.query<{ revoked: boolean; pending: boolean }>(
+      "SELECT revoked_at IS NOT NULL AS revoked, checked_at = 'infinity' AS pending FROM mcp_grants WHERE id = $1", [id]);
+    if (!r || r.revoked) return false;
+    if (!r.pending) return true;
+    if (Date.now() >= until) return false;
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
 }
 
 async function blocked(): Promise<Set<string>> {

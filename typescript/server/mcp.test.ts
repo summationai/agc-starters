@@ -289,3 +289,44 @@ test('AMCP-6, AMCP-7: a recheck that returns a lower role takes the owner’s co
     fake.close();
   }
 });
+
+test('AMCP-6, AMCP-7: the call that sees a demotion runs demoted; concurrent calls share one recheck; a stuck recheck lets no one in', { skip }, async () => {
+  const { createServer } = await import('node:http');
+  let asked = 0;
+  const fake = createServer((req, res) => {
+    if (!req.url?.startsWith('/users/')) return void res.writeHead(500).end();
+    asked++;
+    setTimeout(() => res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { id: req.url!.slice(7), role: 'member' } })), 200);
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
+  const was = process.env.AGC_AUTH_URL;
+  process.env.AGC_AUTH_URL = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
+  const roleOf = (r: { content: { text: string }[] }) => (JSON.parse(r.content[0]!.text.split('\n')[1]!) as { user: { role: string | null } }).user.role;
+  try {
+    // The very call whose recheck demotes the owner runs as a member.
+    const who = '00000000-0000-4000-8000-0000000000b4';
+    const { access_token: token } = await connect(await signedIn(who, 'owner'));
+    assert.equal(roleOf(await call(token, 'get_me')), 'owner', 'not due: the stored role');
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [who]);
+    assert.equal(roleOf(await call(token, 'get_me')), 'member', 'the recheck that demotes is the call’s own');
+    assert.equal(asked, 1);
+    // Two calls at once, both due: agent.cloud is asked once, and both run with the role it gave.
+    const both = '00000000-0000-4000-8000-0000000000b5';
+    const { access_token: t2 } = await connect(await signedIn(both, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [both]);
+    asked = 0;
+    const [a, b] = await Promise.all([call(t2, 'get_me'), call(t2, 'get_me')]);
+    assert.equal(asked, 1, 'one recheck for the grant');
+    assert.deepEqual([roleOf(a), roleOf(b)], ['member', 'member']);
+    // A recheck another process claimed and never answered: no one is let in once the wait runs out.
+    const stuck = '00000000-0000-4000-8000-0000000000b6';
+    const { access_token: t3 } = await connect(await signedIn(stuck));
+    await pool.query("UPDATE mcp_grants SET checked_at = 'infinity' WHERE user_id = $1", [stuck]);
+    const started = Date.now();
+    assert.equal((await rpc(t3, 'tools/list')).status, 401);
+    assert.ok(Date.now() - started >= 5_500, 'it waited for the other process first');
+  } finally {
+    process.env.AGC_AUTH_URL = was;
+    fake.close();
+  }
+});
