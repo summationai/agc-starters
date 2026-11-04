@@ -183,7 +183,9 @@ These rules are `review` until the build adds the checks named in each.
     - blocked tools, which are hidden from `tools/list` and refused if called;
     - whether agent.cloud's organization or app switch lets agents in.
   - **The page's own API** lives under `/mcp/agents/*`, never `/api/*`. It answers only the person's session, never a Bearer token, so no agent can approve, unblock or revoke; the build's checks try each with a Bearer.
-  - **The owner's role** is the one from the last sign-in or recheck, so a role taken away is gone within 5 minutes.
+  - **The owner's role:**
+    - on agent.cloud's sign-in, it's the role from the last sign-in or recheck, so a role taken away is gone within 5 minutes;
+    - on edge sign-in, it's the gate's `x-agc-user-role` on that very request. The edge empties a client's copy on every route (agent.cloud's ROLE-4) and rechecks it at least once a minute (ROLE-3).
   - `review` (the build adds CONF:agents)
 - **AMCP-7:** **Safe by default.**
   - **Budgets:** each grant gets 60 calls a minute and 10 writes a minute, counted in the database. Over budget gets 429 with `Retry-After`.
@@ -192,12 +194,12 @@ These rules are `review` until the build adds the checks named in each.
   - **Attribution:** writes store `via`, the client's name, beside the person, and the page shows "via Claude".
   - **Who a grant is:** a grant names the person by a stable identity.
     - On agent.cloud's sign-in, that's the app user's id.
-    - On edge sign-in, it's the issuer and provider subject from the gate's signed `x-agc-identity` (agent.cloud's EDGE-15), never the email alone.
-    - An edge sign-in that gives no provider subject can't grant.
+    - On edge sign-in, it's the `iss` and `provider_id` claims of the gate's signed `x-agc-identity` (agent.cloud's EDGE-15). The JWT's `sub` is the email, so it never names a grant.
+    - An assertion without `provider_id` can't grant.
   - **Losing access:** every grant is rechecked with agent.cloud at most every 5 minutes. On agent.cloud's sign-in, that's AUTH-8's `GET $AGC_AUTH_URL/users/<id>`; on edge sign-in, it's agent.cloud's AMCP-15.
     - The answer also refreshes the person's role.
     - A refusal ends the grant.
-    - On a customer target's own sign-in, a grant also ends 24 hours after consent. The person then consents again, through the gate, which asks their provider.
+  - **A customer's own provider:** on a target whose sign-in is the customer's own provider, agent.cloud can't yet ask the provider about a person by `provider_id`. So consent refuses there, saying agents aren't available on this sign-in yet, and agent.cloud keeps the MCP paths gated (its AMCP-12).
   - `review` (the build adds CONF:mcp-safety)
 - **AMCP-8:** **Point.**
   - **Pointing:** the badge's "Point for your agent" lets the person click something.
