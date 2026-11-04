@@ -1,7 +1,6 @@
 // AMCP-1, AMCP-4, AMCP-5, AMCP-7: the app's MCP server. JSON-RPC over POST /mcp, one answer per request, no session.
 // Its tools are the app's own /api routes (tools.ts), and a call runs the route in-process as the person who said yes.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import type { Hono } from 'hono';
 import { bodyLimit } from 'hono/body-limit';
 import type { Env } from '../auth.ts';
@@ -9,11 +8,10 @@ import { pool } from '../db.ts';
 import { log } from '../log.ts';
 import { challenge, grantOf, originOf, resourceOf, type Grant } from './oauth.ts';
 import { catalog, type Tool } from './tools.ts';
-import { parse } from 'smol-toml';
+import { APP_NAME } from './app-name.ts';
+import { AGENT_CLOUD } from './identity.ts';
 
-const EDGE = process.env.AGC_AUTH_PROVIDER === 'edge';
-// The app's name, from its manifest, read once.
-export const APP_NAME = (() => { try { return (parse(readFileSync('agentcloud.toml', 'utf8')) as { app?: { name?: string } }).app?.name || 'This app'; } catch { return 'This app'; } })();
+export { APP_NAME };
 const PROTOCOLS = ['2025-06-18', '2025-11-25'];
 const POINT_GET = { name: 'point_get', title: 'What the person pointed at', description: 'What the person last pointed at in this app with the badge’s Point, in the last 10 minutes: the page, the element’s label and a CSS selector. Labels only, never what they typed.', inputSchema: { type: 'object', properties: {}, additionalProperties: false }, annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false } };
 const INSTRUCTIONS = 'These tools are this app’s own API, called as the person who connected you, with exactly their access. '
@@ -40,22 +38,35 @@ const stable = (v: unknown): string => (Array.isArray(v) ? `[${v.map(stable).joi
 
 type LiveGrant = Grant & { user: { id: string; email: string | null; name: string | null; role?: string | null } };
 
-// AMCP-7: a grant is rechecked with agent.cloud as a session is (AUTH-8): at most once every 5 minutes, and only a 2xx, or
-// agent.cloud not answering, keeps it. Behind a target's gate there's no agent.cloud user to ask about.
+// AMCP-7: a grant is rechecked with agent.cloud as a session is (AUTH-8): at most once every 5 minutes. On agent.cloud's
+// sign-in it asks about the app user (GET /users/<id>); on edge sign-in, about the gate's issuer and provider_id
+// (GET /people, agent.cloud's AMCP-15). Only a 2xx, or agent.cloud not answering, keeps it; a 2xx's role replaces the
+// person's stored role, so a role taken away takes the owner's controls with it (AMCP-6).
 async function stillLetIn(g: LiveGrant): Promise<boolean> {
-  if (EDGE) return true;
   const { rowCount } = await pool.query("UPDATE mcp_grants SET checked_at = now() WHERE id = $1 AND checked_at <= now() - interval '5 minutes'", [g.id]);
   if (!rowCount) return true;
+  const url = g.subject_iss === AGENT_CLOUD
+    ? `${process.env.AGC_AUTH_URL}/users/${encodeURIComponent(g.user_id)}`
+    : `${process.env.AGC_AUTH_URL}/people?${new URLSearchParams({ iss: g.subject_iss, provider_id: g.subject_id })}`;
   let status: number | null = null;
+  let body: unknown = null;
   try {
-    const res = await fetch(`${process.env.AGC_AUTH_URL}/users/${encodeURIComponent(g.user_id)}`, {
+    const res = await fetch(url, {
       redirect: 'manual', signal: AbortSignal.timeout(5_000),
       headers: { authorization: `Bearer ${process.env.AGC_AUTH_TOKEN}`, 'x-agc-session-start': String(g.created_at.getTime()) },
     });
     status = res.status;
-    await res.body?.cancel().catch(() => {});
+    body = res.ok ? await res.json().catch(() => null) : null;
+    if (!res.ok) await res.body?.cancel().catch(() => {});
   } catch { /* agent.cloud didn't answer: keep it, and ask again in 5 minutes */ }
-  if (status === null || status >= 500 || (status >= 200 && status < 300)) return true;
+  if (status !== null && status >= 200 && status < 300) {
+    const who = body && typeof body === 'object' ? ((body as { user?: unknown }).user ?? body) as { role?: unknown } : null;
+    if (who && typeof who === 'object' && 'role' in who) {
+      await pool.query('UPDATE users SET role = $2 WHERE id = $1', [g.user_id, who.role === 'owner' || who.role === 'member' ? who.role : null]);
+    }
+    return true;
+  }
+  if (status === null || status >= 500) return true;
   await pool.query('UPDATE mcp_grants SET revoked_at = coalesce(revoked_at, now()) WHERE id = $1', [g.id]);
   log.info('agent connection ended: agent.cloud no longer lets this person in', { user: g.user_id, status });
   return false;
@@ -118,7 +129,7 @@ export function mcpServer(app: Hono<Env>) {
 
     if (name === 'point_get') {
       await record('ok');
-      const { rows: [p] } = await pool.query<{ pick: unknown; at: Date }>("SELECT pick, at FROM mcp_points WHERE user_id = $1 AND at > now() - interval '10 minutes'", [g.user_id]);
+      const { rows: [p] } = await pool.query<{ pick: unknown; at: Date }>("SELECT pick, at FROM mcp_points WHERE subject_iss = $1 AND subject_id = $2 AND at > now() - interval '10 minutes'", [g.subject_iss, g.subject_id]);
       return ok({ content: [{ type: 'text', text: marked(p ? JSON.stringify({ ...(p.pick as object), at: p.at.toISOString() }) : 'They haven’t pointed at anything in the last 10 minutes.') }] });
     }
     if (!tool) {

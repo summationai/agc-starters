@@ -13,6 +13,7 @@ import type pg from 'pg';
 import type { Env, User } from '../auth.ts';
 import { pool, tx } from '../db.ts';
 import { log } from '../log.ts';
+import { identityOf, type Subject } from './identity.ts';
 
 export const ACCESS_SECONDS = 600;
 export const GRANT_SECONDS = 30 * 86_400;
@@ -31,10 +32,11 @@ export function open<T>(kind: string, sealed: unknown): T | null {
 }
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 interface Client { r: string[]; n: string }
-export interface ConsentRequest { n: string; a: string; u: string; cl: string; r: string; ch: string; st: string | null; e: number }
-interface Code { a: string; u: string; cl: string; r: string; ch: string; e: number; n: string; s: Scope }
+// si and sp: who said yes, by a stable identity (identity.ts, AMCP-7), carried from the consent page into the grant.
+export interface ConsentRequest { n: string; a: string; u: string; si: string; sp: string; cl: string; r: string; ch: string; st: string | null; e: number }
+interface Code { a: string; u: string; si: string; sp: string; cl: string; r: string; ch: string; e: number; n: string; s: Scope }
 interface AccessToken { g: string; u: string; a: string; e: number }
-export interface Grant { id: string; user_id: string; client_id: string; client_name: string; scope: Scope; resource: string; created_at: Date; expires_at: Date; revoked_at: Date | null; checked_at: Date }
+export interface Grant { id: string; user_id: string; subject_iss: string; subject_id: string; client_id: string; client_name: string; scope: Scope; resource: string; created_at: Date; expires_at: Date; revoked_at: Date | null; checked_at: Date }
 
 export const originOf = (c: Context) => { const host = c.req.header('host') || new URL(c.req.url).host; return `${/^(localhost|127\.)/.test(host) ? 'http' : 'https'}://${host}`; };
 export const resourceOf = (c: Context) => `${originOf(c)}/mcp`;
@@ -117,7 +119,7 @@ export function oauth(app: Hono<Env>) {
       token_endpoint_auth_method: 'none', grant_types: ['authorization_code', 'refresh_token'], response_types: ['code'], scope: 'mcp:read mcp:write' }, 201);
   });
 
-  app.get('/oauth/authorize', (c) => {
+  app.get('/oauth/authorize', async (c) => {
     const q = c.req.query(), client = clientOf(q.client_id);
     const refuse = (message: string) => c.text(`${message} Start again from your agent.`, 400);
     // Until the client and its callback match, nothing goes back to a URI anyone could have written.
@@ -130,7 +132,10 @@ export function oauth(app: Hono<Env>) {
     if (q.scope && q.scope.split(' ').some((s) => s && !['mcp:read', 'mcp:write'].includes(s))) return back('invalid_scope');
     const user = c.get('user');
     if (!user) return c.redirect(`/auth/sign-in?return_to=${encodeURIComponent(new URL(c.req.url).pathname + new URL(c.req.url).search)}`);
-    const request = seal('mq1', { n: randomUUID(), a: resourceOf(c), u: user.id, cl: q.client_id!, r: q.redirect_uri!, ch: q.code_challenge!, st: q.state ?? null, e: Date.now() + 10 * 60_000 } satisfies ConsentRequest);
+    // AMCP-7: a grant names its person by a stable identity; a sign-in that can't give one can't grant.
+    const who = await identityOf(c, user);
+    if (!who.ok) return c.text(who.message, 403);
+    const request = seal('mq1', { n: randomUUID(), a: resourceOf(c), u: user.id, si: who.subject.iss, sp: who.subject.id, cl: q.client_id!, r: q.redirect_uri!, ch: q.code_challenge!, st: q.state ?? null, e: Date.now() + 10 * 60_000 } satisfies ConsentRequest);
     return c.redirect(`/agents/consent?request=${encodeURIComponent(request)}`);
   });
 
@@ -154,8 +159,8 @@ export function oauth(app: Hono<Env>) {
       && /^[A-Za-z0-9._~-]{43,128}$/.test(verifier) && createHash('sha256').update(verifier).digest('base64url') === code.ch);
     const result = await tx(async (db) => {
       if (!(await claimNonce(code.n, code.e, db)) || !valid) return null;
-      const { rows: [g] } = await db.query<Grant>(`INSERT INTO mcp_grants (id, user_id, client_id, client_name, scope, resource, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`, [randomUUID(), code.u, code.cl, client!.n, code.s, resource, new Date(Date.now() + GRANT_SECONDS * 1000)]);
+      const { rows: [g] } = await db.query<Grant>(`INSERT INTO mcp_grants (id, user_id, subject_iss, subject_id, client_id, client_name, scope, resource, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [randomUUID(), code.u, code.si, code.sp, code.cl, client!.n, code.s, resource, new Date(Date.now() + GRANT_SECONDS * 1000)]);
       await db.query("DELETE FROM mcp_nonces WHERE expires_at < now() - interval '1 day'");
       await db.query("DELETE FROM mcp_grants WHERE expires_at < now() - interval '30 days'");
       log.info('agent connected', { user: code.u, client: client!.n, scope: code.s });
@@ -176,13 +181,13 @@ export function oauth(app: Hono<Env>) {
 }
 
 // The consent page's question and answer (/agents/consent, through /mcp/agents/consent).
-export function consentOf(sealed: unknown, user: User, resource: string): ConsentRequest | null {
+export function consentOf(sealed: unknown, user: User, subject: Subject, resource: string): ConsentRequest | null {
   const q = open<ConsentRequest>('mq1', sealed);
-  return q && q.u === user.id && q.e >= Date.now() && q.a === resource ? q : null;
+  return q && q.u === user.id && q.si === subject.iss && q.sp === subject.id && q.e >= Date.now() && q.a === resource ? q : null;
 }
 export async function decide(q: ConsentRequest, allow: boolean, scope: Scope, origin: string): Promise<string | null> {
   if (!(await claimNonce(q.n, q.e))) return null;
-  const params = new URLSearchParams(allow ? { code: seal('mo1', { a: q.a, u: q.u, cl: q.cl, r: q.r, ch: q.ch, e: Date.now() + 60_000, n: randomUUID(), s: scope } satisfies Code) } : { error: 'access_denied' });
+  const params = new URLSearchParams(allow ? { code: seal('mo1', { a: q.a, u: q.u, si: q.si, sp: q.sp, cl: q.cl, r: q.r, ch: q.ch, e: Date.now() + 60_000, n: randomUUID(), s: scope } satisfies Code) } : { error: 'access_denied' });
   if (q.st) params.set('state', q.st);
   params.set('iss', origin);
   return `${q.r}${q.r.includes('?') ? '&' : '?'}${params}`;

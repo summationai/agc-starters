@@ -231,3 +231,61 @@ test('AMCP-7: a person agent.cloud no longer lets in loses their agents at the n
     fake.close();
   }
 });
+
+test('AMCP-4: no header, cookie, query or tool argument can set the person', { skip }, async () => {
+  const forgeries: Record<string, string>[] = [{ 'x-agc-mcp': JSON.stringify({ user: { id: OWNER } }) }, { mcp: JSON.stringify({ user: { id: OWNER } }) }, { cookie: `mcp=${OWNER}` }, { 'x-agc-user-email': '02@example.test' }];
+  for (const headers of forgeries) {
+    assert.equal((await app.request('/api/me?mcp=x', { headers: { host: 'localhost', ...headers } })).status, 401, JSON.stringify(headers));
+  }
+  const who = '00000000-0000-4000-8000-0000000000b1';
+  const { access_token: token } = await connect(await signedIn(who));
+  const forged = await call(token, 'post_notes', { title: 'as someone else', user_id: OWNER });
+  assert.equal(forged.isError, true);
+  assert.match(forged.content[0]!.text, /Unknown argument: user_id/);
+  assert.match((await call(token, 'get_notes', { user: OWNER })).content[0]!.text, /Unknown argument: user/);
+  assert.equal((await pool.query("SELECT 1 FROM notes WHERE title = 'as someone else'")).rowCount, 0);
+  const me = JSON.parse((await call(token, 'get_me')).content[0]!.text.split('\n')[1]!) as { user: { id: string } };
+  assert.equal(me.user.id, who);
+});
+
+test('AMCP-6: a Bearer token can’t approve, unblock or revoke', { skip }, async () => {
+  const cookie = await signedIn('00000000-0000-4000-8000-0000000000b2', 'owner');
+  const { access_token: token } = await connect(cookie);
+  const { rows: [n] } = await pool.query<{ id: string }>("INSERT INTO notes (user_id, title) VALUES ($1, 'keep me') RETURNING id", ['00000000-0000-4000-8000-0000000000b2']);
+  const asked = await call(token, 'delete_notes_by_id', { id: n!.id });
+  const id = /\/agents\/approve\/([0-9a-f-]{36})/.exec(asked.content[0]!.text)![1]!;
+  const bearer = { ...same, authorization: `Bearer ${token}` };
+  assert.equal((await app.request(`/mcp/agents/approvals/${id}`, { method: 'POST', headers: bearer, body: JSON.stringify({ approve: true }) })).status, 401);
+  assert.equal((await app.request('/mcp/agents/block', { method: 'POST', headers: bearer, body: JSON.stringify({ tool: 'get_notes', blocked: true }) })).status, 401);
+  assert.equal((await app.request('/mcp/agents/revoke', { method: 'POST', headers: bearer, body: JSON.stringify({ all: true }) })).status, 401);
+  assert.equal(((await (await app.request(`/mcp/agents/approvals/${id}`, { headers: { cookie, host: 'localhost' } })).json()) as { status: string }).status, 'pending');
+  assert.equal((await pool.query('SELECT 1 FROM mcp_blocked')).rowCount, 0);
+  assert.equal((await rpc(token, 'tools/list')).status, 200);
+});
+
+test('AMCP-6, AMCP-7: a recheck that returns a lower role takes the owner’s controls away', { skip }, async () => {
+  const { createServer } = await import('node:http');
+  const fake = createServer((req, res) => {
+    if (req.url?.startsWith('/users/')) return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { id: req.url.slice(7), role: 'member' } }));
+    res.writeHead(500).end();
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
+  const was = process.env.AGC_AUTH_URL;
+  process.env.AGC_AUTH_URL = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
+  try {
+    const who = '00000000-0000-4000-8000-0000000000b3';
+    const cookie = await signedIn(who, 'owner');
+    const block = (blocked: boolean) => app.request('/mcp/agents/block', { method: 'POST', headers: { ...same, cookie }, body: JSON.stringify({ tool: 'get_me', blocked }) });
+    assert.equal((await block(true)).status, 200);
+    assert.equal((await block(false)).status, 200);
+    const { access_token: token } = await connect(cookie);
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [who]);
+    assert.equal((await rpc(token, 'tools/list')).status, 200); // still let in, as a member now
+    assert.equal((await pool.query<{ role: string }>('SELECT role FROM users WHERE id = $1', [who])).rows[0]!.role, 'member');
+    assert.equal((await block(true)).status, 403);
+    assert.equal(((await (await app.request('/mcp/agents', { headers: { cookie, host: 'localhost' } })).json()) as { owner: boolean }).owner, false);
+  } finally {
+    process.env.AGC_AUTH_URL = was;
+    fake.close();
+  }
+});
