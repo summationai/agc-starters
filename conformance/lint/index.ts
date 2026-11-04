@@ -243,6 +243,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const slow = text.split('\n').find((l) => l.includes('(`slow-route`)')) ?? '';
     const missing = [['one per row', /one per row/], ['an index', /\bindex\b/], ['a job for outside calls', /outside call[^.]*\bjob\b/]].filter(([, re]) => !(re as RegExp).test(slow)).map(([what]) => what);
     if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route`'} (DOC-4)`);
+    if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-4)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
