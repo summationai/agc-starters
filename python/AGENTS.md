@@ -13,6 +13,10 @@ uv run pyright             type-check
 uv add <package>           a new dependency (commit uv.lock with it)
 ```
 
+## Say what you're doing
+
+While you build an open Work item, people in the app's organization can watch you in the console. At each step, before you start it, run `agc now "<what you're about to do>"`: one line, in the present tense, of up to 120 characters ("Adding the scores table and its migration"). They see it as your words, with the saves that follow under it. It goes through the running mirror (`agc up --detach`).
+
 ## Where things are
 
 ```text
