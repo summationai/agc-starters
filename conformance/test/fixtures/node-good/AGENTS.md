@@ -14,3 +14,4 @@ This fixture stands in for a real stack section. It explains the commands, the l
 ## Say what you're doing
 
 At each step, before you start it, run `agc now "<what you're about to do>"`.
+- **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin, and a smoke flow that calls it before any `SIGN IN` and expects `401|403` proves it.

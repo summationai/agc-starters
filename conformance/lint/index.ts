@@ -231,6 +231,11 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('agc now "')) return fail('AGENTS.md doesn\u2019t ask the agent to say each step with agc now (DOC-4)');
     if (!/^- \*\*A foreign key:\*\* index it\b.*`unindexed-fk`/m.test(text)) return fail('AGENTS.md doesn\u2019t say to index every foreign key, naming unindexed-fk (DOC-5)');
     if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
+    // DOC-4: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
+    const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
+    if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-4)');
+    const unnamed = ['/admin', '/internal', '/debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
+    if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-4)`);
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
