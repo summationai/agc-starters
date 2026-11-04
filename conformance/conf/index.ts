@@ -555,23 +555,31 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const id = (r.json as { id?: string } | null)?.id ?? '';
       const t0 = Date.now();
       const took = await until(5_000, async () => ((await env.mail()).some((m) => m.key === `note-${id}/created`) ? Date.now() - t0 : undefined), 100);
-      await env.start(worker);
-      // A second web process whose email service never answers, stopped while its run waits on it: the job stays
-      // queued under the lease it took, and once that lapses the worker sends the email, once.
-      const stuck = await env.web('web-stuck', { ...env.appEnv(), AGC_EMAIL_URL: 'http://10.255.255.1:9/v1/messages' }, { alias: false });
+      // A second web process whose email service takes the send and never answers. With the worker still stopped, it
+      // owns the job under its lease and its send is open at the service; then it's killed mid-send. Only then does the
+      // worker start: once the lease lapses, it sends that email, once.
+      const hold = await env.heldEmail();
+      const stuck = await env.web('web-stuck', { ...env.appEnv(), AGC_EMAIL_URL: hold.url }, { alias: false });
       allLogs.push(stuck);
       const up = await env.ready(stuck, 60_000);
       const sj: Jar = new Map();
       const s = up === undefined ? { problem: 'the second web process never became ready' } : await signIn(env, stuck, sj, who);
       const r2 = s.problem ? undefined : await req(env, stuck, sj, 'POST', '/api/notes', { title: `Backstop ${tag()}` });
       const id2 = (r2?.json as { id?: string } | null)?.id ?? '';
-      await sleep(1000);
+      const owned = id2 ? await until(5_000, async () => {
+        const [row] = await env.sql<{ held: boolean; attempts: number }>(`SELECT locked_until > now() AS held, attempts FROM jobs WHERE payload->>'note_id' = $1`, [id2]);
+        return row?.held && row.attempts === 1 && (await hold.held()) >= 1 ? true : undefined;
+      }, 200) : undefined;
       await env.kill(stuck);
-      opts.log('waiting for the stopped web process\u2019s lease to lapse (up to 90 s)\u2026');
-      const back = id2 ? await until(90_000, async () => ((await env.mail()).some((m) => m.key === `note-${id2}/created`) ? true : undefined), 1000) : undefined;
+      await env.start(worker);
+      opts.log('waiting for the killed web process\u2019s lease to lapse (up to 90 s)\u2026');
+      const back = owned ? await until(90_000, async () => ((await env.mail()).some((m) => m.key === `note-${id2}/created`) ? true : undefined), 1000) : undefined;
       const sent = (await env.mail()).filter((m) => m.key === `note-${id2}/created`);
-      const ok = r.status === 201 && took !== undefined && !s.problem && r2?.status === 201 && !!back && sent.length === 1 && sent[0]!.attempts === 1;
-      set('CONF:jobs-prompt', (ok ? pass : fail)(`with the worker stopped, the web process emailed ${took === undefined ? 'nothing within 5 s' : `in ${(took / 1000).toFixed(1)} s`}; ${s.problem ?? (r2?.status === 201 ? `a web process stopped mid-run left its job to the worker, which sent it ${sent.length} time(s)${back ? '' : ' (not within 90 s)'}` : `the second web process answered ${r2?.status}`)}`));
+      const ok = r.status === 201 && took !== undefined && !s.problem && r2?.status === 201 && !!owned && !!back && sent.length === 1 && sent[0]!.attempts === 1;
+      const second = s.problem ?? (r2?.status !== 201 ? `the second web process answered ${r2?.status}`
+        : !owned ? 'the second web process never held the job\u2019s lease with its send open'
+          : `the web process killed mid-send left its job to the worker, which sent it ${sent.length} time(s)${back ? '' : ' (not within 90 s)'}`);
+      set('CONF:jobs-prompt', (ok ? pass : fail)(`with the worker stopped, the web process emailed ${took === undefined ? 'nothing within 5 s' : `in ${(took / 1000).toFixed(1)} s`}; ${second}`));
     }
 
     // OBS-3: workflow events for each note, well-formed.
