@@ -4,6 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkSignInState, invariantResult, readChecks, runFlow } from '../vendor/agc/checks.ts';
+import { noPrimaryKey, unindexedFks } from '../vendor/agc/preserve.ts';
 import { AUTH_TOKEN, type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, verdict, type TestResult } from '../lib/report.ts';
 import { run, sleep, until } from '../lib/sh.ts';
@@ -23,7 +24,7 @@ const tag = () => randomBytes(4).toString('hex');
 export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
-  'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:logs-json', 'CONF:error-log',
+  'CONF:keys', 'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
   'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
@@ -66,6 +67,15 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     await env.startPlatform();
     const applied = await env.migrate();
     opts.log(`applied ${applied.length} migrations`);
+    // DATA-9: what agc check and the rehearsal ask of the schema the migrations made (the CLI's preserve.ts), as a failure here.
+    {
+      const d = env.db();
+      await d.connect();
+      try {
+        const found = [...(await noPrimaryKey(d)), ...(await unindexedFks(d))];
+        set('CONF:keys', found.length ? fail(found.join(' ')) : pass(`after ${applied.length} migrations every table has a primary key, and every foreign key an index`));
+      } finally { await d.end(); }
+    }
     // APP-6: the seed, after the migrations, as agc up runs it on a mirror that starts empty.
     const seedPath = join(stack.dir, 'seed.sql');
     const seedSql = existsSync(seedPath) ? readFileSync(seedPath, 'utf8') : null;
