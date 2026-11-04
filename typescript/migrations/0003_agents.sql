@@ -48,7 +48,7 @@ CREATE TABLE mcp_calls (
   grant_id uuid NOT NULL REFERENCES mcp_grants (id) ON DELETE CASCADE,
   tool     text NOT NULL,
   writes   boolean NOT NULL,
-  status   text NOT NULL,
+  status   text NOT NULL CHECK (status IN ('ok', 'error', 'refused', 'asked', 'denied', 'withheld')),
   at       timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX mcp_calls_grant ON mcp_calls (grant_id, at);

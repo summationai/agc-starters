@@ -2,6 +2,7 @@
 // browser is on: where the app runs, what's running, whether it's released. Replace it with your app's own first page;
 // the Notes example lives in Notes.tsx.
 import { type ReactNode, useEffect, useState } from 'react';
+import { AgentBadge } from './Agents.tsx';
 import { api, type PartState, type Welcome as Facts } from './api.ts';
 
 const STACKS = {
@@ -50,7 +51,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
           <div className="mark" aria-hidden="true">
             {['teal', 'pink', 'orange', 'blue'].map((c, i) => <span className="slot" key={c}><span className="bar" style={{ background: `var(--${c})`, animationDelay: `${i * 0.08}s, ${1.3 + i * 0.2}s` }} /></span>)}
           </div>
-          {facts && <div className="chips up d1">{chips(facts, here, prod)}</div>}
+          {facts && <div className="chips up d1">{chips(facts, here, prod)}<AgentBadge /></div>}
           <h1 id="hero-h" className="title up d2">{app} is ready to build.</h1>
           <p className="lede up d3">
             This is the agent.cloud starter: a web app, an API, a Postgres database and a background worker, wired together{run === 'mirror' ? ' and running on your machine' : ''}.

@@ -168,7 +168,7 @@ export function mcpServer(app: Hono<Env>) {
     let json: unknown = null;
     try { json = text ? JSON.parse(text) : null; } catch { /* not JSON: the text itself */ }
     if (res.status >= 400) {
-      await record(String(res.status));
+      await record('error');
       return toolError(marked((json as { error?: { message?: string } } | null)?.error?.message ?? (text.slice(0, 500) || `The route answered ${res.status}.`)));
     }
     await record('ok');
