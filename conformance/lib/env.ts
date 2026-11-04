@@ -235,6 +235,18 @@ export class Env {
     return (await run('docker', ['inspect', '-f', `{{(index .NetworkSettings.Networks "${this.net}").IPAddress}}`, c.name])).stdout.trim();
   }
   async kill(c: Container) { await run('docker', ['kill', c.name]); }
+  // JOB-5: an email service that takes each send and never answers it, so a web process can be stopped mid-send. held()
+  // counts the sends it has taken.
+  async heldEmail(): Promise<{ url: string; held: () => Promise<number> }> {
+    const name = `held-${this.id}`;
+    this.containers.push(name);
+    await this.docker(['run', '-d', '--name', name, '--network', this.net, '--network-alias', 'held-email', '-p', '127.0.0.1::8098', 'node:24-slim', 'node', '-e',
+      "let n = 0; require('http').createServer((q, s) => { if (q.url === '/_held') { s.end(String(n)); return; } n++; }).listen(8098)"]);
+    const port = await this.publishedPort(name, 8098);
+    const count = async () => Number(await (await fetch(`http://127.0.0.1:${port}/_held`)).text());
+    await until(30_000, async () => (await count().then(() => true, () => false)) || undefined, 500);
+    return { url: 'http://held-email:8098/v1/messages', held: count };
+  }
   async start(c: Container) { await this.docker(['start', c.name]); }
   async pauseDb() { await this.docker(['pause', `db-${this.id}`]); }
   async unpauseDb() { await this.docker(['unpause', `db-${this.id}`]); }
