@@ -20,7 +20,8 @@ CREATE TABLE mcp_grants (
   created_at  timestamptz NOT NULL DEFAULT now(),
   expires_at  timestamptz NOT NULL,
   revoked_at  timestamptz,
-  checked_at  timestamptz NOT NULL DEFAULT now()
+  checked_at  timestamptz NOT NULL DEFAULT now(),
+  asking_until timestamptz  -- a recheck's lease (AMCP-7): a process asking agent.cloud holds it for 10 s
 );
 CREATE INDEX mcp_grants_user ON mcp_grants (user_id);
 CREATE INDEX mcp_grants_subject ON mcp_grants (subject_iss, subject_id);

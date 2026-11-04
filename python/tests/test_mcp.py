@@ -495,7 +495,7 @@ def _role_of(result: dict[str, Any]) -> str | None:
 
 
 @needs_pg
-def test_amcp_6_7_the_call_that_sees_a_demotion_runs_demoted_concurrent_calls_share_one_recheck_a_stuck_one_lets_no_one_in(
+def test_amcp_6_7_the_call_that_sees_a_demotion_runs_demoted_concurrent_calls_share_one_recheck_a_stuck_one_is_recovered(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowDemoter)
@@ -520,13 +520,89 @@ def test_amcp_6_7_the_call_that_sees_a_demotion_runs_demoted_concurrent_calls_sh
             a, b = pool_.map(lambda _: call(t2, "get_me"), range(2))
         assert _SlowDemoter.asked == 1  # one recheck for the grant
         assert [_role_of(a), _role_of(b)] == ["member", "member"]
-        # A recheck another process claimed and never answered: no one is let in once the wait runs out.
+        # A recheck another process claimed and never answered: the call waits out the lease, then claims and asks itself.
         stuck = "00000000-0000-4000-8000-0000000000b6"
         t3 = connect(signed_in(stuck))["access_token"]
-        sql("UPDATE mcp_grants SET checked_at = 'infinity' WHERE user_id = %s", stuck)
+        sql(
+            "UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() + interval '2 seconds'"
+            " WHERE user_id = %s",
+            stuck,
+        )
+        _SlowDemoter.asked = 0
         started = time.monotonic()
-        assert rpc(t3, "tools/list").status_code == 401
-        assert time.monotonic() - started >= 5.5  # it waited for the other process first
+        assert rpc(t3, "tools/list").status_code == 200  # recovered once the lease passed
+        assert time.monotonic() - started >= 1.5  # it waited for the other process first
+        assert _SlowDemoter.asked == 1  # then it asked itself
+        assert sql("SELECT asking_until FROM mcp_grants WHERE user_id = %s", stuck) == [{"asking_until": None}]
+    finally:
+        server.shutdown()
+        sql("DELETE FROM mcp_registrations")
+
+
+@needs_pg
+def test_amcp_7_a_recheck_lease_is_bounded_abandoned_recovered_others_waited_for_failures_leave_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.mcp import server as mcp_server
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _SlowDemoter)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AGC_AUTH_URL", f"http://127.0.0.1:{server.server_port}")
+    sql("DELETE FROM mcp_registrations")
+
+    def lease(who: str) -> Any:
+        return sql("SELECT asking_until FROM mcp_grants WHERE user_id = %s", who)[0]["asking_until"]
+
+    try:
+        # A lease left behind by a process that died: past, and the recheck still due. The next call claims it and asks.
+        gone = "00000000-0000-4000-8000-0000000000c1"
+        t1 = connect(signed_in(gone, "owner"))["access_token"]
+        sql(
+            "UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() - interval '1 second'"
+            " WHERE user_id = %s",
+            gone,
+        )
+        _SlowDemoter.asked = 0
+        assert _role_of(call(t1, "get_me")) == "member"  # recovered at once, with the role agent.cloud gave
+        assert _SlowDemoter.asked == 1
+        assert lease(gone) is None
+        # Another process holds a live lease and answers within it: the call waits, asks nothing, and runs with that answer.
+        other = "00000000-0000-4000-8000-0000000000c2"
+        t2 = connect(signed_in(other, "owner"))["access_token"]
+        sql(
+            "UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() + interval '5 seconds'"
+            " WHERE user_id = %s",
+            other,
+        )
+
+        def answer() -> None:
+            sql("UPDATE users SET role = 'member' WHERE id = %s", other)
+            sql("UPDATE mcp_grants SET checked_at = now(), asking_until = NULL WHERE user_id = %s", other)
+
+        timer = threading.Timer(0.8, answer)
+        timer.start()
+        _SlowDemoter.asked = 0
+        started = time.monotonic()
+        assert _role_of(call(t2, "get_me")) == "member"  # the other process's answer
+        waited = time.monotonic() - started
+        assert 0.7 <= waited < 4.5  # it waited for the answer, not the whole lease
+        assert _SlowDemoter.asked == 0  # and asked nothing itself
+        timer.cancel()
+        # A recheck that fails part-way (here the role write throws) leaves no lease behind: the next call asks again.
+        fails = "00000000-0000-4000-8000-0000000000c3"
+        t3 = connect(signed_in(fails, "owner"))["access_token"]
+        sql("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = %s", fails)
+
+        def refuse(*_: object) -> None:
+            raise RuntimeError("the database refused the write")
+
+        with monkeypatch.context() as m:
+            m.setattr(mcp_server, "_set_role", refuse)
+            assert rpc(t3, "tools/list").status_code != 200  # the failed recheck lets nothing through
+        assert lease(fails) is None  # its lease went with it
+        _SlowDemoter.asked = 0
+        assert _role_of(call(t3, "get_me")) == "member"  # the next call asks again, and goes on
+        assert _SlowDemoter.asked == 1
     finally:
         server.shutdown()
         sql("DELETE FROM mcp_registrations")

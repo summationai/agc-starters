@@ -290,7 +290,7 @@ test('AMCP-6, AMCP-7: a recheck that returns a lower role takes the owner’s co
   }
 });
 
-test('AMCP-6, AMCP-7: the call that sees a demotion runs demoted; concurrent calls share one recheck; a stuck recheck lets no one in', { skip }, async () => {
+test('AMCP-6, AMCP-7: the call that sees a demotion runs demoted; concurrent calls share one recheck; a stuck recheck is recovered after its lease', { skip }, async () => {
   const { createServer } = await import('node:http');
   let asked = 0;
   const fake = createServer((req, res) => {
@@ -318,13 +318,74 @@ test('AMCP-6, AMCP-7: the call that sees a demotion runs demoted; concurrent cal
     const [a, b] = await Promise.all([call(t2, 'get_me'), call(t2, 'get_me')]);
     assert.equal(asked, 1, 'one recheck for the grant');
     assert.deepEqual([roleOf(a), roleOf(b)], ['member', 'member']);
-    // A recheck another process claimed and never answered: no one is let in once the wait runs out.
+    // A recheck another process claimed and never answered: the call waits out the lease, then claims and asks itself.
     const stuck = '00000000-0000-4000-8000-0000000000b6';
     const { access_token: t3 } = await connect(await signedIn(stuck));
-    await pool.query("UPDATE mcp_grants SET checked_at = 'infinity' WHERE user_id = $1", [stuck]);
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() + interval '2 seconds' WHERE user_id = $1", [stuck]);
+    asked = 0;
     const started = Date.now();
-    assert.equal((await rpc(t3, 'tools/list')).status, 401);
-    assert.ok(Date.now() - started >= 5_500, 'it waited for the other process first');
+    assert.equal((await rpc(t3, 'tools/list')).status, 200, 'recovered once the lease passed');
+    assert.ok(Date.now() - started >= 1_500, 'it waited for the other process first');
+    assert.equal(asked, 1, 'then it asked itself');
+    assert.equal((await pool.query('SELECT asking_until FROM mcp_grants WHERE user_id = $1', [stuck])).rows[0].asking_until, null);
+  } finally {
+    process.env.AGC_AUTH_URL = was;
+    fake.close();
+  }
+});
+
+test('AMCP-7: a recheck lease is bounded: an abandoned one is recovered, another process’s is waited for, and a failing recheck leaves none', { skip }, async () => {
+  const { createServer } = await import('node:http');
+  let asked = 0;
+  const fake = createServer((req, res) => {
+    asked++;
+    res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { id: req.url!.slice(7), role: 'member' } }));
+  });
+  await new Promise<void>((r) => fake.listen(0, '127.0.0.1', () => r()));
+  const was = process.env.AGC_AUTH_URL;
+  process.env.AGC_AUTH_URL = `http://127.0.0.1:${(fake.address() as { port: number }).port}`;
+  const roleOf = (r: { content: { text: string }[] }) => (JSON.parse(r.content[0]!.text.split('\n')[1]!) as { user: { role: string | null } }).user.role;
+  const lease = async (who: string) => (await pool.query('SELECT asking_until FROM mcp_grants WHERE user_id = $1', [who])).rows[0].asking_until as Date | null;
+  try {
+    // A lease left behind by a process that died: past, and the recheck still due. The next call claims it and asks.
+    const gone = '00000000-0000-4000-8000-0000000000c1';
+    const { access_token: t1 } = await connect(await signedIn(gone, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() - interval '1 second' WHERE user_id = $1", [gone]);
+    asked = 0;
+    assert.equal(roleOf(await call(t1, 'get_me')), 'member', 'recovered at once, with the role agent.cloud gave');
+    assert.equal(asked, 1);
+    assert.equal(await lease(gone), null);
+    // Another process holds a live lease and answers within it: the call waits, asks nothing, and runs with that answer.
+    const other = '00000000-0000-4000-8000-0000000000c2';
+    const { access_token: t2 } = await connect(await signedIn(other, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes', asking_until = now() + interval '5 seconds' WHERE user_id = $1", [other]);
+    asked = 0;
+    const answer = setTimeout(() => {
+      void pool.query("UPDATE users SET role = 'member' WHERE id = $1", [other]).then(() => pool.query('UPDATE mcp_grants SET checked_at = now(), asking_until = NULL WHERE user_id = $1', [other]));
+    }, 800);
+    const started = Date.now();
+    assert.equal(roleOf(await call(t2, 'get_me')), 'member', 'the other process’s answer');
+    assert.ok(Date.now() - started >= 700 && Date.now() - started < 4_500, 'it waited for the answer, not the whole lease');
+    assert.equal(asked, 0, 'and asked nothing itself');
+    clearTimeout(answer);
+    // A recheck that fails part-way (here the role write throws) leaves no lease behind: the next call asks again.
+    const fails = '00000000-0000-4000-8000-0000000000c3';
+    const { access_token: t3 } = await connect(await signedIn(fails, 'owner'));
+    await pool.query("UPDATE mcp_grants SET checked_at = now() - interval '6 minutes' WHERE user_id = $1", [fails]);
+    const query = pool.query.bind(pool);
+    (pool as { query: unknown }).query = (text: unknown, ...rest: unknown[]) => {
+      if (typeof text === 'string' && text.startsWith('UPDATE users SET role')) return Promise.reject(new Error('the database refused the write'));
+      return (query as (...a: unknown[]) => unknown)(text, ...rest);
+    };
+    try {
+      assert.notEqual((await rpc(t3, 'tools/list')).status, 200, 'the failed recheck lets nothing through');
+    } finally {
+      (pool as { query: unknown }).query = query;
+    }
+    assert.equal(await lease(fails), null, 'its lease went with it');
+    asked = 0;
+    assert.equal(roleOf(await call(t3, 'get_me')), 'member', 'the next call asks again, and goes on');
+    assert.equal(asked, 1);
   } finally {
     process.env.AGC_AUTH_URL = was;
     fake.close();
