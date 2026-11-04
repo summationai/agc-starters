@@ -17,3 +17,4 @@ Once a mirror's work has shipped, delete its copy with `agc down <name> --delete
 
 At each step, before you start it, run `agc now "<what you're about to do>"`.
 - **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin, and a smoke flow that calls it before any `SIGN IN` and expects `401|403` proves it.
+- **A lake connection** (`ducklake` or `flightsql`): add `GET /api/status`, answering JSON with peak memory and lake timings. Without it, agent.cloud's review files `no-status-route`.
