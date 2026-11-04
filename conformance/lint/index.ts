@@ -39,7 +39,43 @@ export function pageRoutes(s: Stack): string[] {
   return problems;
 }
 
+// AMCP-9: what the UI may call. Only web/src/api.ts talks to the server, and it calls only /api routes the server has,
+// sign-in's /auth/*, and the agents pages' session-only /mcp/agents/* (the stated exception).
+const ROUTE = (p: string) => p.replace(/\$\{[^}]*\}/g, ':p').replace(/\{[^}]*\}/g, ':p').replace(/:[A-Za-z_][A-Za-z0-9_]*/g, ':p').replace(/\?.*$/, '');
+function serverRoutes(s: Stack): Set<string> {
+  const out = new Set<string>();
+  for (const f of sources(s).filter((f) => !f.startsWith('web/'))) {
+    const text = read(s, f);
+    for (const m of text.matchAll(/api\(\s*app\s*,\s*'(get|post|put|patch|delete)'\s*,\s*'([^']+)'/g)) out.add(`${m[1]!.toUpperCase()} ${ROUTE(m[2]!)}`);
+    for (const m of text.matchAll(/\bapp\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/g)) out.add(`${m[1]!.toUpperCase()} ${ROUTE(m[2]!)}`);
+  }
+  return out;
+}
+export function uiCalls(s: Stack): string[] {
+  const problems: string[] = [];
+  const ui = s.files.filter((f) => /^web\/src\/.*\.(ts|tsx|js|jsx)$/.test(f) && !/\.(test|spec)\./.test(f));
+  for (const f of ui.filter((f) => f !== 'web/src/api.ts')) {
+    const text = read(s, f);
+    for (const [what, re] of [['fetch', /\bfetch\s*\(/], ['a WebSocket', /\bnew\s+WebSocket\s*\(/], ['an EventSource', /\bnew\s+EventSource\s*\(/], ['a beacon', /\bsendBeacon\s*\(/],
+      ['XMLHttpRequest', /\bXMLHttpRequest\b/], ['a form action', /<form[^>]*\baction\s*=/]] as const) if (re.test(text)) problems.push(`${f} uses ${what}`);
+  }
+  if (!s.files.includes('web/src/api.ts')) return [...problems, 'no web/src/api.ts'];
+  const routes = serverRoutes(s);
+  const api = read(s, 'web/src/api.ts');
+  for (const m of api.matchAll(/call<[^>]*>\(\s*'(GET|POST|PUT|PATCH|DELETE)'\s*,\s*[`'"]([^`'"]+)[`'"]/g)) {
+    const [method, path] = [m[1]!, ROUTE(m[2]!)];
+    if (path.startsWith('/auth/') || path.startsWith('/mcp/agents')) continue;
+    if (!path.startsWith('/api/')) problems.push(`api.ts calls ${method} ${path}, outside /api`);
+    else if (!routes.has(`${method} ${path}`)) problems.push(`api.ts calls ${method} ${path}, which the server doesn\u2019t have`);
+  }
+  return problems;
+}
+
 export const lint: Record<string, (s: Stack) => TestResult> = {
+  'LINT:api': (s) => {
+    const problems = uiCalls(s);
+    return (problems.length ? fail : pass)(problems.length ? problems.join('; ') : 'only web/src/api.ts calls the server, and only /api routes the server has, /auth/* and /mcp/agents/*');
+  },
   'LINT:manifest': (s) => {
     const web = table(table(s.raw.service).web);
     const worker = table(table(s.raw.service).worker);
