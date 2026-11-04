@@ -25,6 +25,7 @@ export const CONF_TESTS = [
   'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
+  'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -192,6 +193,142 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         : loose.length ? `not __Host- cookies (prefix, Secure, Path=/, no Domain): ${[...new Set(loose.map((c) => c.name))].join(', ')}` : `${new Set(lines.map((c) => c.name)).size} cookies, all __Host-`));
       const prodCookie = (cookiesOk ? pass : fail)(s ? `session cookie ${s.name}: HttpOnly ${s.httpOnly}, SameSite ${s.sameSite || 'unset'}, Secure ${s.secure}, lasts ${s.lifetime ?? 'the browser session'} s` : 'the callback set no session cookie');
       out.set('CONF:cookies', { ...prodCookie, perRule: { 'DEV-6': skip('dev mode not run') } });
+    }
+
+    // AUTH-8: each session is rechecked with agent.cloud at most once every 5 minutes, sending when it began. Time moves by
+    // moving a session's expiry back: each lasts a day from its sign-in, so its start moves with it.
+    {
+      const person = async (what: string) => {
+        const jar: Jar = new Map();
+        await signIn(env, web, jar, `${what}-${tag()}@example.test`);
+        const me = await req(env, web, jar, 'GET', '/api/me');
+        return { jar, id: String((me.json as { user?: { id?: string } } | null)?.user?.id ?? '') };
+      };
+      const age = (id: string, minutes: number) => env.sql('UPDATE sessions SET expires_at = expires_at - make_interval(mins => $2::int) WHERE user_id = $1', [id, minutes]);
+      const heard = async (id: string) => (await env.rechecks()).filter((r) => r.id === id);
+      const me = async (p: { jar: Jar }) => (await req(env, web, p.jar, 'GET', '/api/me')).status;
+
+      {
+        const p = await person('recheck');
+        const fresh = await me(p);
+        const n0 = (await heard(p.id)).length;
+        await age(p.id, 4);
+        const four = await me(p);
+        const n1 = (await heard(p.id)).length;
+        await age(p.id, 2);
+        const six = await me(p);
+        const n2 = (await heard(p.id)).length;
+        const again = await me(p);
+        const got = await heard(p.id);
+        // 5 minutes after that recheck, by moving the session's record of it back (checked_at, the starters' own column).
+        await env.sql("UPDATE sessions SET checked_at = checked_at - interval '6 minutes' WHERE user_id = $1", [p.id]);
+        const later = await me(p);
+        const n4 = (await heard(p.id)).length;
+        const [row] = await env.sql<{ ms: string }>("SELECT (extract(epoch FROM expires_at - interval '1 day') * 1000)::bigint AS ms FROM sessions WHERE user_id = $1", [p.id]);
+        const sent = got[0]?.session_start ?? null;
+        const startOk = sent !== null && row !== undefined && Math.abs(Number(sent) - Number(row.ms)) <= 1;
+        const ok = UUID.test(p.id) && [fresh, four, six, again, later].every((s) => s === 200) && n0 === 0 && n1 === 0 && n2 === 1 && got.length === 1 && n4 === 2 && startOk;
+        set('CONF:recheck-interval', (ok ? pass : fail)(`rechecks heard: a new session ${n0}, at 4 minutes ${n1}, at 6 minutes ${n2}, right after ${got.length}, 6 minutes after that ${n4}; /api/me ${[fresh, four, six, again, later].join(', ')}; x-agc-session-start ${sent ?? 'not sent'}${startOk ? ', when the session began' : `, the session began at ${row?.ms ?? 'unknown'}`}`));
+      }
+      {
+        const p = await person('recheck-404');
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, 404);
+        // Two requests at once, the answer held back a second: the one that comes while the recheck is under way waits for it.
+        await env.pausePlatform();
+        const both = Promise.all([me(p), sleep(200).then(() => me(p))]);
+        await sleep(1000);
+        await env.unpausePlatform();
+        const [ended, alongside] = await both;
+        const after = await me(p);
+        const [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+        const asked = (await heard(p.id)).length;
+        const ok = UUID.test(p.id) && ended === 401 && alongside === 401 && after === 401 && n === 0 && asked === 1;
+        set('CONF:recheck-404', (ok ? pass : fail)(`after a 404: /api/me ${ended}, one alongside it ${alongside}, then ${after}; ${n} sessions left; ${asked} rechecks heard`));
+      }
+      // Any other answer that isn't a 2xx or a 5xx ends it too. A redirect leads to a place that would let the person in
+      // and counts as a recheck heard, so following it shows as two.
+      const refused = async (what: string, status: number) => {
+        const p = await person(what);
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, status);
+        const ended = await me(p);
+        const after = await me(p);
+        const [{ n }] = await env.sql<{ n: number }>('SELECT count(*)::int AS n FROM sessions WHERE user_id = $1', [p.id]);
+        const asked = (await heard(p.id)).length;
+        const ok = UUID.test(p.id) && ended === 401 && after === 401 && n === 0 && asked === 1;
+        return (ok ? pass : fail)(`after a ${status}: /api/me ${ended}, then ${after}; ${n} sessions left; ${asked} rechecks heard`);
+      };
+      set('CONF:recheck-401', await refused('recheck-401', 401));
+      set('CONF:recheck-redirect', await refused('recheck-302', 302));
+      {
+        // Triggers stand in for an app role without those rights. A: the app can't delete the session; B: nor mark it refused.
+        // Either way it stays refused, even once agent.cloud is down (a 503 would keep a live session) and time moves on.
+        // C: another process's recheck under way (its claim, written here): a request waits for its answer.
+        const a = await person('recheck-nodelete');
+        const b = await person('recheck-nowrite');
+        const c = await person('recheck-elsewhere');
+        for (const p of [a, b, c]) await age(p.id, 6);
+        for (const p of [a, b]) await env.answerRechecks(p.id, 404);
+        const state = async (id: string) => String((await env.sql<{ s: string }>('SELECT checked_at::text AS s FROM sessions WHERE user_id = $1', [id]))[0]?.s ?? 'gone');
+        await env.sql(`CREATE FUNCTION conf_refuse() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'conformance: refused'; END $$;
+          CREATE TRIGGER conf_no_delete BEFORE DELETE ON sessions FOR EACH ROW EXECUTE FUNCTION conf_refuse()`);
+        const r: Record<string, number | string> = {};
+        try {
+          r.aEnded = await me(a);
+          await env.answerRechecks(a.id, 503);
+          r.aAfter = await me(a);
+          await env.sql(`CREATE TRIGGER conf_no_mark BEFORE UPDATE ON sessions FOR EACH ROW WHEN (NEW.checked_at = '-infinity') EXECUTE FUNCTION conf_refuse()`);
+          r.bEnded = await me(b);
+          await env.answerRechecks(b.id, 503);
+          const t0 = Date.now();
+          r.bAfter = await me(b);
+          r.bWaited = (Date.now() - t0) / 1000;
+        } finally {
+          await env.sql('DROP TRIGGER IF EXISTS conf_no_mark ON sessions; DROP TRIGGER conf_no_delete ON sessions; DROP FUNCTION conf_refuse()');
+        }
+        await env.sql("UPDATE sessions SET expires_at = expires_at - interval '6 minutes' WHERE user_id = ANY($1::uuid[])", [[a.id, b.id]]);
+        r.aLater = await me(a);
+        r.bLater = await me(b);
+        r.aState = await state(a.id);
+        r.bState = await state(b.id);
+        r.aAsked = (await heard(a.id)).length;
+        r.bAsked = (await heard(b.id)).length;
+        await env.sql("UPDATE sessions SET checked_at = 'infinity' WHERE user_id = $1", [c.id]);
+        const t1 = Date.now();
+        const waiting = me(c);
+        await sleep(1000);
+        await env.sql('UPDATE sessions SET checked_at = now() WHERE user_id = $1', [c.id]);
+        r.cIn = await waiting;
+        r.cWaited = (Date.now() - t1) / 1000;
+        r.cAsked = (await heard(c.id)).length;
+        const ok = UUID.test(a.id) && UUID.test(b.id) && UUID.test(c.id)
+          && r.aEnded === 401 && r.aAfter === 401 && r.aLater === 401 && r.aState === '-infinity' && r.aAsked === 1
+          && r.bEnded === 401 && r.bAfter === 401 && r.bLater === 401 && r.bState === 'infinity' && r.bAsked === 1
+          && r.cIn === 200 && (r.cWaited as number) >= 1 && r.cAsked === 0;
+        set('CONF:recheck-delete-fails', (ok ? pass : fail)(`delete refused: /api/me ${r.aEnded}, then with agent.cloud answering 503 ${r.aAfter}, later ${r.aLater}; `
+          + `checked_at ${r.aState}, ${r.aAsked} rechecks heard. Delete and marking refused both refused: /api/me ${r.bEnded}, then ${r.bAfter} after `
+          + `${(r.bWaited as number).toFixed(1)} s, later ${r.bLater}; checked_at ${r.bState}, ${r.bAsked} rechecks heard. A recheck under way elsewhere: `
+          + `/api/me ${r.cIn} once its answer was written, after ${(r.cWaited as number).toFixed(1)} s, ${r.cAsked} rechecks heard`));
+      }
+      {
+        const p = await person('recheck-5xx');
+        await age(p.id, 6);
+        await env.answerRechecks(p.id, 503);
+        const kept = await me(p);
+        const again = await me(p);
+        const asked = (await heard(p.id)).length;
+        const q = await person('recheck-down');
+        await age(q.id, 6);
+        await env.pausePlatform();
+        const t0 = Date.now();
+        const down = await me(q).catch(() => 0);
+        const waited = Date.now() - t0;
+        await env.unpausePlatform();
+        const up = await me(q);
+        const ok = kept === 200 && again === 200 && asked === 1 && down === 200 && up === 200 && waited < 10_000;
+        set('CONF:recheck-unreachable', (ok ? pass : fail)(`a 503: /api/me ${kept}, then ${again} with ${asked} recheck; agent.cloud not answering: /api/me ${down || 'no answer'} after ${(waited / 1000).toFixed(1)} s, then ${up} once it's back`));
+      }
     }
 
     // AUTH-2: the platform's own state probe.

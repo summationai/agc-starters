@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { parse } from 'smol-toml';
 
-type Run = 'mirror' | 'live' | 'rehearsal' | 'preview' | 'unknown';
+type Run = 'mirror' | 'private' | 'live' | 'rehearsal' | 'preview' | 'unknown';
 type Database = { state: 'running'; migrations: number; checked_at: string } | { state: 'not verified'; reason: 'unreachable' | 'timeout' | 'query_failed'; checked_at: string };
 
 // The manifest, read once at start: the app's name, whether it was started from Start, whether it has a worker, and how
@@ -15,10 +15,11 @@ const manifest = parse(readFileSync('agentcloud.toml', 'utf8')) as {
 };
 
 // APP-9: where this process runs, first match wins. AGENTCLOUD_MIRROR is agc's; agent.cloud reserves the name, so no
-// release carries it. AGC_RUN is set by agent.cloud after the app's own env, so an app can't claim to be live.
-export function runOf(env: NodeJS.ProcessEnv): Run {
+// release carries it. AGC_RUN is set by agent.cloud after the app's own env, so an app can't claim to be live. `preview` is
+// the request's X-Agc-Preview, which agent.cloud's preview gate sets: it only lowers live to private, never raises anything.
+export function runOf(env: NodeJS.ProcessEnv, preview?: string | null): Run {
   if (env.AGENTCLOUD_MIRROR) return 'mirror';
-  if (env.AGC_RUN === 'live') return 'live';
+  if (env.AGC_RUN === 'live') return preview === 'private' ? 'private' : 'live';
   if (env.AGC_RUN === 'rehearsal') return 'rehearsal';
   if (env.AGC_PREVIEW_EXPIRES_AT) return 'preview';
   return 'unknown';
@@ -77,12 +78,12 @@ async function database(now = Date.now()): Promise<Database> {
 
 const pair = (url: string | undefined, token: string | undefined) => (url && token ? 'configured' : 'not set up');
 
-export async function welcome(env: NodeJS.ProcessEnv = process.env) {
+export async function welcome(env: NodeJS.ProcessEnv = process.env, preview?: string | null) {
   const db = await database();
   return {
     app: String(manifest.app?.name ?? ''),
     stack: 'typescript',
-    run: runOf(env),
+    run: runOf(env, preview),
     // APP-8, APP-14: "live" only when agc init wrote exactly that (an app made through Start); never any other value.
     started: manifest.app?.started === 'live' ? 'live' as const : null,
     parts: {

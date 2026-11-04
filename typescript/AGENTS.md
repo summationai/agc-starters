@@ -12,6 +12,10 @@ npm test             the server's own tests (server/*.test.ts); agent.cloud's ch
 npm run build        the UI into web/dist (agent.cloud runs this when it builds the image)
 ```
 
+## Say what you're doing
+
+While you build an open Work item, people in the app's organization can watch you in the console. At each step, before you start it, run `agc now "<what you're about to do>"`: one line, in the present tense, of up to 120 characters ("Adding the scores table and its migration"). They see it as your words, with the saves that follow under it. It goes through the running mirror (`agc up --detach`).
+
 ## Where things are
 
 ```text
@@ -32,6 +36,8 @@ seed.sql            a demo person and three notes for a mirror that starts empty
 
 - **An API route:** in `server/app.ts`, under `/api/`. Call `signedIn(c)` for anything personal. Changes take a JSON body (any other body gets 415), checked by a schema (below).
 - **A table or column:** `agc migration new <slug>`, then plain SQL in the new file, then `agc migrate`. Key things on `uuid`. Use `CHECK (status IN (…))` for fixed sets of values, so mirrors show them. Never change the schema from code.
+- **A check:** every main journey gets a `[[check.smoke]]` and every rule the data must keep a `[[check.invariant]]` in `agentcloud.toml`, then `agc check`. Never ship with none: a release that goes live on its own would go live with nothing checked, and agent.cloud's review files that (`no-checks`, "Releases go live with nothing checked"). The notes example's two checks are this app's only ones, so when you remove the example, replace them with your app's own.
+- **Business logic:** keep it in the app's code, not in database triggers. Use a trigger only for simple per-row bookkeeping, such as setting `updated_at`: a trigger hides behaviour from the code a reviewer reads, and agent.cloud's masked copies and migration checks handle triggers poorly.
 - **A background job:** insert into `jobs` inside the same `tx()` as the write it belongs to, and add a handler in `server/worker.ts`. The worker polls every 10 s while busy and backs off to 10 minutes when idle, so the database can sleep: don't make a person wait on a job. A job can run twice, so make it safe to: emails carry a `key` that names the message for good, like `note-<id>/created`.
 - **A workflow step:** `event('order.paid', 'order:<id>', { related: ['user:<id>'] })`. Ids only, never emails or names.
 - **Logging:** `log.info('what happened', { ids })`. Never log emails, names, tokens or request bodies.
@@ -55,7 +61,7 @@ app.post('/api/notes', body(NoteIn), async (c) => {
 ## Rules this stack keeps
 
 - Health (`/api/health`) never touches the database. agent.cloud asks it every 2 seconds.
-- On a mirror the pool keeps idle connections 30 s; in production it closes them after 1 s, so the database can sleep (`server/db.ts`). From a laptop a mirror query costs about 0.25 s and a new connection about 1.7 s: fetch what a page needs in one query, not one per row.
-- Sign-in checks `state` before trading the code. Sessions last a day. Cookies are `__Host-` cookies outside a mirror: apps share the agent.cloud site, and the prefix stops a neighbour app from planting one. Any cookie you add keeps that rule (`Secure`, `Path=/`, no `Domain`).
+- The pool keeps each idle connection about 60 s, in production and on a mirror, so a request within a minute reuses one, and closes it after that, so the database can sleep (`server/db.ts`). From a laptop a mirror query costs about 0.25 s and a new connection about 1.7 s: fetch what a page needs in one query, not one per row.
+- Sign-in checks `state` before trading the code. Sessions last a day, and each is rechecked with agent.cloud at most once every 5 minutes, sending when it began: a 2xx keeps it, so does a recheck agent.cloud can't answer (a 5xx, a timeout, a network error), and every other answer ends it (a 404, a 401, a redirect, which is never followed), even when deleting the session fails. Cookies are `__Host-` cookies outside a mirror: apps share the agent.cloud site, and the prefix stops a neighbour app from planting one. Any cookie you add keeps that rule (`Secure`, `Path=/`, no `Domain`).
 - On SIGTERM, web and the worker finish what's in flight and exit.
 - Nothing writes inside the app's folder. Use `/tmp`, or better, the database.

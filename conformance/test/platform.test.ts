@@ -52,3 +52,21 @@ test('email: each key once, attempts counted', async () => {
   const { messages } = (await (await fetch(`${base}/_fake/mail`)).json()) as { messages: { key: string; attempts: number }[] };
   assert.deepEqual(messages.map((m) => [m.key, m.attempts]), [['note-1/created', 2]]);
 });
+
+test('AUTH-8: a recheck is recorded with its session start, and answers what the suite set', async () => {
+  const id = '0b7c2f1e-1111-4222-8333-444455556666';
+  const recheck = (start?: string) => fetch(`${auth}/users/${id}`, { redirect: 'manual', headers: { ...bearer('agca_conformance'), ...(start ? { 'x-agc-session-start': start } : {}) } });
+  assert.equal((await recheck('1700000000000')).status, 200);
+  assert.equal((await fetch(`${auth}/users/${id}`, { headers: bearer('wrong') })).status, 401);
+  for (const status of [404, 503, 401]) {
+    assert.equal((await fetch(`${base}/_fake/users/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status }) })).status, 200);
+    assert.equal((await recheck()).status, status);
+  }
+  await fetch(`${base}/_fake/users/${id}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ status: 302 }) });
+  const moved = await recheck();
+  assert.equal(moved.status, 302);
+  assert.equal(moved.headers.get('location'), `/_fake/redirected/${id}`);
+  assert.equal((await fetch(new URL(moved.headers.get('location')!, base))).status, 200, 'where it leads would let them in');
+  const { rechecks } = (await (await fetch(`${base}/_fake/rechecks`)).json()) as { rechecks: { id: string; session_start: string | null }[] };
+  assert.deepEqual(rechecks.map((r) => [r.id, r.session_start]), [[id, '1700000000000'], [id, null], [id, null], [id, null], [id, null], [id, null]]);
+});

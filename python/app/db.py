@@ -9,18 +9,18 @@ import psycopg
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import ConnectionPool
 
-from .env import ON_MIRROR, required
+from .env import required
 
 DATABASE_URL = required("DATABASE_URL")["DATABASE_URL"]
 
 # Opened in the background: the app starts serving (and answering health) even while the database wakes up.
-# DATA-8: no connection is kept while idle (min_size 0, idle ones close after a second), so a quiet app's database can
-# sleep: Neon suspends a compute with no connections after 5 minutes. In production, reconnecting costs a few
-# milliseconds when work arrives. On a mirror (agc up) the app runs on this machine and its database in the cloud,
-# behind agc's proxy: from a laptop a new connection costs about 1.7 s and each query about 0.25 s. There idle
-# connections stay 30 s, so a request that comes a few seconds after the last one reuses a connection instead of opening one.
+# DATA-8: idle connections stay about 60 s, here and on a mirror, so a request within a minute of the last reuses one
+# instead of opening a new connection: in production that's a new NAT translation and TLS handshake each time, and on a
+# mirror (agc up, from a laptop through agc's proxy) about 1.7 s. min_size 0, so a quiet app sheds them all and its database
+# can still sleep (Neon suspends a compute 5 minutes after its last connection closes). psycopg_pool closes at most one
+# idle connection per max_idle: one or two close within 2 or 3 minutes, and a full pool of 10 within about 11.
 pool: ConnectionPool[psycopg.Connection[DictRow]] = ConnectionPool(
-    DATABASE_URL, min_size=0, max_size=10, max_idle=30 if ON_MIRROR else 1, open=False, kwargs={"row_factory": dict_row}
+    DATABASE_URL, min_size=0, max_size=10, max_idle=60, open=False, kwargs={"row_factory": dict_row}
 )
 
 

@@ -26,6 +26,8 @@ jobs:
         working-directory: conformance
       - run: npx tsc --noEmit -p . && npm test
         working-directory: conformance
+      - name: the release scripts' own tests
+        run: sh scripts/test-release.sh
       - name: every stack shares the same UI
         run: |
           for s in */agentcloud.toml; do d=$(dirname "$s"); [ "$d" = typescript ] || diff -r typescript/web "$d/web" -x dist -x node_modules; done

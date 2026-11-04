@@ -6,7 +6,6 @@
 // so the database can go to sleep. The first email after a quiet spell can take a few minutes: that's the price of not
 // paying for an always-awake database.
 import pg from 'pg';
-import { pool } from './db.ts';
 import { required } from './env.ts';
 import { event, log } from './log.ts';
 
@@ -18,9 +17,23 @@ interface Job { id: string; kind: string; payload: Record<string, unknown>; atte
 let stopping = false;
 let wake: () => void = () => {};
 
-const handlers: Record<string, (job: Job) => Promise<void>> = {
-  async note_email(job) {
-    const { rows } = await pool.query<{ id: string; title: string; email: string | null }>(
+// JOB-4: one connection for one poll or one job, closed right after, so between polls the worker holds none and the
+// database can sleep. The web's pool keeps idle connections a minute (DATA-8, db.ts); the worker never uses it.
+async function withDb<T>(fn: (db: pg.Client) => Promise<T>): Promise<T> {
+  const db = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 10_000 });
+  db.on('error', () => {}); // a dropped connection also fails the query in hand, which main() logs; don't crash on it
+  await db.connect();
+  try {
+    return await fn(db);
+  } finally {
+    await db.end().catch(() => {});
+  }
+}
+
+// Each handler gets the job's own connection: use it for the job's reads and writes.
+const handlers: Record<string, (job: Job, db: pg.Client) => Promise<void>> = {
+  async note_email(job, db) {
+    const { rows } = await db.query<{ id: string; title: string; email: string | null }>(
       'SELECT n.id, n.title, u.email FROM notes n JOIN users u ON u.id = n.user_id WHERE n.id = $1', [job.payload.note_id]);
     const note = rows[0];
     if (!note) return; // deleted since: nothing to say
@@ -38,18 +51,8 @@ const handlers: Record<string, (job: Job) => Promise<void>> = {
 };
 
 // Claims one job: due, not done, and not held by a live lease. SKIP LOCKED lets workers claim side by side.
-// Each poll opens its own connection and closes it straight after, so an idle worker holds none between polls (the
-// pool would keep one for its idle timeout).
-async function claim(): Promise<Job | null> {
-  const db = new pg.Client({ connectionString: DATABASE_URL, connectionTimeoutMillis: 10_000 });
-  db.on('error', () => {}); // a dropped connection also fails the query in hand, which main() logs; don't crash on it
-  await db.connect();
-  try {
-    return await claimWith(db);
-  } finally {
-    await db.end().catch(() => {});
-  }
-}
+// Each poll opens its own connection and closes it straight after (withDb), so an idle worker holds none between polls.
+const claim = (): Promise<Job | null> => withDb(claimWith);
 
 async function claimWith(db: pg.Client): Promise<Job | null> {
   const { rows } = await db.query<Job>(`
@@ -62,16 +65,18 @@ async function claimWith(db: pg.Client): Promise<Job | null> {
 
 async function work(job: Job) {
   try {
-    const handler = handlers[job.kind];
-    if (!handler) throw new Error(`no handler for ${job.kind}`);
-    await handler(job);
-    await pool.query('UPDATE jobs SET done_at = now(), locked_until = NULL, last_error = NULL WHERE id = $1', [job.id]);
+    await withDb(async (db) => {
+      const handler = handlers[job.kind];
+      if (!handler) throw new Error(`no handler for ${job.kind}`);
+      await handler(job, db);
+      await db.query('UPDATE jobs SET done_at = now(), locked_until = NULL, last_error = NULL WHERE id = $1', [job.id]);
+    });
   } catch (e) {
     // Try again later, backing off; the error is kept on the job, not logged with its data.
     const delay = Math.min(2 ** job.attempts, 3600);
     try {
-      await pool.query(`UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => $2), last_error = $3 WHERE id = $1`,
-        [job.id, delay, (e as Error).message.slice(0, 500)]);
+      await withDb((db) => db.query(`UPDATE jobs SET locked_until = NULL, run_at = now() + make_interval(secs => $2), last_error = $3 WHERE id = $1`,
+        [job.id, delay, (e as Error).message.slice(0, 500)]));
     } catch (db) {
       // The database is gone too: the job's lease runs out and it's claimed again, so nothing is lost.
       log.warn('couldn\u2019t record a failed job', { job: job.id, error: (db as Error).message });
@@ -94,7 +99,6 @@ async function main() {
     await new Promise<void>((r) => { const t = setTimeout(r, wait * 1000); wake = () => { clearTimeout(t); r(); }; });
     wait = Math.min(wait * 2, IDLE_MAX_S);
   }
-  await pool.end().catch(() => {});
   log.info('worker stopped');
   process.exit(0);
 }
