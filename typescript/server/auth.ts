@@ -27,8 +27,11 @@ const local = (path: string | undefined) => {
 };
 const DAY = 86_400;
 
-export interface User { id: string; email: string | null; name: string | null }
-export type Env = { Variables: { user: User | null } };
+// role: 'owner' or 'member' in the app's organization, as agent.cloud says at sign-in (or the edge's x-agc-user-role).
+export interface User { id: string; email: string | null; name: string | null; role?: string | null }
+// via: the agent a request came through (AMCP-4, AMCP-7), set only for a tool call the MCP module runs in-process; a
+// request from the network never has one. Bindings.mcp is how that call names its person: c.env is never the network's.
+export type Env = { Bindings: { mcp?: { user: User; via: string } }; Variables: { user: User | null; via: string | null } };
 
 const hash = (token: string) => createHash('sha256').update(token).digest('hex');
 // Byte lengths, not string lengths: timingSafeEqual throws on unequal buffers, and 'é' is one character but two bytes.
@@ -50,11 +53,12 @@ async function edgeUser(c: Context<Env>): Promise<User | null> {
   const email = (c.req.header('x-agc-user-email') ?? DEV_USER).trim().toLowerCase();
   if (!email) return null;
   const name = (c.req.header('x-agc-user-name') ?? '').trim() || null;
+  const role = c.req.header('x-agc-user-role') === 'owner' ? 'owner' : 'member';
   const id = idOf(email);
   await pool.query(
-    `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
-     ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()`, [id, email, name]);
-  return { id, email, name };
+    `INSERT INTO users (id, email, name, role) VALUES ($1, $2, $3, $4)
+     ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role, last_seen_at = now()`, [id, email, name, role]);
+  return { id, email, name, role };
 }
 
 // AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
@@ -124,6 +128,13 @@ function stillLetIn(key: string, userId: string, started: number): Promise<boole
 
 // Who's signed in, for every request: their session cookie, if it's live.
 export const session: MiddlewareHandler<Env> = async (c, next) => {
+  // AMCP-4: a tool call the MCP module runs in-process carries its person; nothing else is asked.
+  const agent = (c.env as Env['Bindings'] | undefined)?.mcp;
+  c.set('via', agent?.via ?? null);
+  if (agent) {
+    c.set('user', agent.user);
+    return next();
+  }
   if (EDGE) {
     c.set('user', await edgeUser(c));
     return next();
@@ -133,14 +144,14 @@ export const session: MiddlewareHandler<Env> = async (c, next) => {
   if (token) {
     const key = hash(token);
     const { rows } = await pool.query<User & { expires_at: Date; due: boolean }>(
-      `SELECT u.id, u.email, u.name, s.expires_at,
+      `SELECT u.id, u.email, u.name, u.role, s.expires_at,
          s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due
        FROM sessions s JOIN users u ON u.id = s.user_id
        WHERE s.token_hash = $1 AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'`, [key]);
     const row = rows[0];
     // A session began a day before it expires (the callback makes each one last a day).
     const ended = row && (row.due || asking.has(key)) && !(await stillLetIn(key, row.id, row.expires_at.getTime() - DAY * 1000));
-    if (row && !ended) c.set('user', { id: row.id, email: row.email, name: row.name });
+    if (row && !ended) c.set('user', { id: row.id, email: row.email, name: row.name, role: row.role });
   }
   await next();
 };
@@ -173,9 +184,9 @@ export function signIn(app: Hono<Env>) {
     }
     const { user } = (await res.json()) as { user: User };
     await pool.query(
-      `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
-       ON CONFLICT (id) DO UPDATE SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()`,
-      [user.id, user.email, user.name]);
+      `INSERT INTO users (id, email, name, role) VALUES ($1, $2, $3, $4)
+       ON CONFLICT (id) DO UPDATE SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role, last_seen_at = now()`,
+      [user.id, user.email, user.name, user.role === 'owner' ? 'owner' : user.role === 'member' ? 'member' : null]);
     const token = randomBytes(32).toString('base64url');
     await pool.query(`INSERT INTO sessions (token_hash, user_id, expires_at) VALUES ($1, $2, now() + interval '1 day')`, [hash(token), user.id]);
     setCookie(c, SESSION, token, { ...cookie, maxAge: DAY });
