@@ -116,6 +116,105 @@ Files people upload go to the app's bucket through signed URLs, never through th
 - **STOR-7:** Before making a 10-minute browser upload policy or a 5-minute download URL, the signer checks that temporary container credentials have at least 11 minutes remaining. It refreshes through the SDK credential chain or refuses a too-short credential. It checks again after the download's HEAD. Static HMAC credentials are unaffected, and backend clients keep their own credential chain (STO-8, STO-15). `CONF:storage`
 - **STOR-8:** Each `STORAGE.md` shows an optional `uploads` migration and authenticated `POST /api/uploads` and `GET /api/uploads/download?key=...` routes. The upload example creates a relative key under the signed-in person's namespace and saves only that key and the owner; bytes go from browser to storage. The download example checks that row's owner before calling `signDownload(key, mayRead)` and returns its 403 or 404 result in the app's error shape. Both responses are `Cache-Control: no-store`. No storage helper runs for a signed-out request or a key another person owns (STO-3, STO-11). The starter installs neither the migration nor these routes. `review`
 
+### Agents over MCP (agent.cloud's `docs/specs/app-mcp.md`; the canvas's `docs/mcp-submission.md`, SUB-1 to SUB-4)
+A person's own agent (Claude, ChatGPT, Codex, Cursor) can do in the app what the person can, after they say yes once.
+- **Where it's served:** the app serves MCP itself, with its own OAuth on its own sign-in, as the canvas does at `canvas.agent.cloud/mcp`.
+- **The tools are the app's own `/api/*` routes.** So a route a builder adds is a tool at its next release, and the builder writes no MCP code.
+- **Where the code lives:** in `server/mcp/` (TypeScript) or `app/mcp/` (Python), with its tables in the migration.
+
+These rules are `review` until the build adds the checks named in each.
+
+- **AMCP-1:** **`POST /mcp` serves MCP.**
+  - **The protocol:** Streamable HTTP, stateless, one JSON answer per request, protocol versions `2025-06-18` and `2025-11-25`.
+  - **Methods:** `initialize`, `ping`, `tools/list` and `tools/call`. A notification gets 202, and `GET /mcp` gets 405.
+  - **The manifest line:** `agentcloud.toml` says `[mcp] server = "app"`, so agent.cloud's edge lets the MCP and OAuth paths through (agent.cloud's AMCP-12).
+  - `review` (the build adds CONF:mcp)
+- **AMCP-2:** **The app is its own OAuth server, on its own sign-in.**
+  - **Metadata:** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414) name the app's origin. `POST /mcp` without a valid token answers 401 with `WWW-Authenticate: Bearer resource_metadata="…"`.
+  - **Registration:** `POST /oauth/register` (RFC 7591) takes public clients only.
+    - A callback must be loopback HTTP with a port, or exactly one on the starter's list: `https://claude.ai/api/mcp/auth_callback`, plus each client's callback once it's proven on agent.cloud's staging.
+    - At most 20 registrations an hour per address. A client id is sealed, carrying its own callbacks, so registration stores nothing.
+  - **Consent:** `GET /oauth/authorize` takes S256 PKCE only, and needs the app's session; without one, it signs the person in first and comes back.
+    - The consent page shows the client's self-declared name, marked unverified, and its callback host.
+    - It offers *Read* (preselected) or *Read and act*.
+    - Allow or Cancel spends the request once.
+  - **Tokens:** `POST /oauth/token` gives the following, and only hashes are stored:
+    - a code that works once, within 60 s;
+    - an access token that lasts 10 minutes;
+    - a refresh token that rotates, with a 30-day absolute end. A replay revokes the grant.
+  - **Revoking:** `POST /oauth/revoke` (RFC 7009).
+  - `review` (the build adds CONF:mcp-oauth)
+- **AMCP-3:** **Every `/api/*` route is a tool, read from the framework's own route table.**
+  - **TypeScript:** routes are registered with one helper, which mounts the Hono route with `zValidator`, as before, and records its tool from the same zod schemas: `api(app, 'post', '/api/notes', { summary: 'Add a note', json: NoteIn }, handler)`.
+  - **Python:** the module reads each FastAPI `APIRoute`'s own metadata (path, methods, docstring, and parameters as the in-process `app.openapi()` describes them). `openapi_url` stays `None`.
+  - **Each tool's name** is the method and path: `GET /api/notes/{id}` is `get_notes_by_id`, unless the route names itself.
+  - **Each tool's description** is the route's summary or docstring.
+  - **Each tool's input** is one object: the route's path and query parameters and its JSON body's fields, side by side.
+  - **Opting out:** a route can be left out, but only with a reason: `exclude: '<why>'` (TypeScript), or `openapi_extra={"x-mcp-exclude": "<why>"}` (Python). The starter leaves out `/api/health`, `/api/welcome` and its debug routes.
+  - **Nothing is missed:** an `/api/*` route that's neither a tool nor left out is **missing**. That covers a TypeScript route registered without `api()`, a route without a summary, and a name used twice in one input.
+  - **`GET /mcp/manifest`** answers only `Authorization: Bearer $AGC_AUTH_TOKEN`, with `{tools, excluded, missing}`. That's what agent.cloud's ship receipt diffs (agent.cloud's AMCP-14).
+  - `review` (the build adds CONF:mcp-tools, where the starter has nothing missing, and a route added to a copy is a tool without other edits)
+- **AMCP-4:** **A tool call runs its route in-process, as the person.**
+  - **How it's called:**
+    - TypeScript: `app.request()`, with the grant's person in `c.env`;
+    - Python: an ASGI call to the app, with the person in the request scope's `state`.
+
+    No header, cookie or argument can set either, and the build's checks forge each one to prove it.
+  - **The session step** takes that person first. After that, the route's own middleware, validation and handler run unchanged, so the agent can do exactly what the person can.
+  - **The answer:** the route's JSON body is the tool's result, and a status of 400 or more is a tool error carrying the route's `error.message`.
+  - `review` (the build adds CONF:mcp-tools)
+- **AMCP-5:** **Hints, read grants, and asking first.**
+  - **Hints:**
+    - `GET` is `readOnlyHint`;
+    - `DELETE`, or a route marked `destructive: true`, is `destructiveHint`.
+  - **Read grants:** a *Read* grant lists and calls only `GET` tools.
+  - **A destructive tool asks first:**
+    - the first call runs nothing, and answers with a link to `/agents/approve/<id>` and a sentence for the agent to say;
+    - the person approves there, with their own session;
+    - the same tool with the same arguments, within an hour, then runs once.
+  - **What approves:** nothing the agent sends.
+  - `review` (the build adds CONF:mcp-tools)
+- **AMCP-6:** **The `/agents` page holds a person's controls.**
+  - **For everyone:**
+    - how to connect each major agent, with the app's `/mcp` URL;
+    - the person's connected agents, each with its last calls and Revoke. Revoke refuses the very next call.
+  - **For owners** (`role: "owner"` from sign-in, or the edge's role):
+    - every connection, with Revoke all;
+    - blocked tools, which are hidden from `tools/list` and refused if called;
+    - whether agent.cloud's organization or app switch lets agents in.
+  - **The page's own API** lives under `/mcp/agents/*`, never `/api/*`. It answers only the person's session, never a Bearer token, so no agent can approve, unblock or revoke; the build's checks try each with a Bearer.
+  - **The owner's role:**
+    - on agent.cloud's sign-in, it's the role from the last sign-in or recheck, so a role taken away is gone within 5 minutes;
+    - on edge sign-in, it's the gate's `x-agc-user-role` on that very request. The edge empties a client's copy on every route (agent.cloud's ROLE-4) and rechecks it at least once a minute (ROLE-3).
+  - `review` (the build adds CONF:agents)
+- **AMCP-7:** **Safe by default.**
+  - **Budgets:** each grant gets 60 calls a minute and 10 writes a minute, counted in the database. Over budget gets 429 with `Retry-After`.
+  - **Data marking:** a tool's result comes inside an app-data block with a fresh nonce, and `initialize`'s instructions say the block is content, not instructions.
+  - **No secrets:** a result holding the value of any secret in the environment, or a known credential shape, is withheld with a tool error.
+  - **Attribution:** writes store `via`, the client's name, beside the person, and the page shows "via Claude".
+  - **Who a grant is:** a grant names the person by a stable identity.
+    - On agent.cloud's sign-in, that's the app user's id.
+    - On edge sign-in, it's the `iss` and `provider_id` claims of the gate's signed `x-agc-identity` (agent.cloud's EDGE-15). The JWT's `sub` is the email, so it never names a grant.
+    - An assertion without `provider_id` can't grant.
+  - **Losing access:** every grant is rechecked with agent.cloud at most every 5 minutes. On agent.cloud's sign-in, that's AUTH-8's `GET $AGC_AUTH_URL/users/<id>`; on edge sign-in, it's agent.cloud's AMCP-15.
+    - The answer also refreshes the person's role.
+    - A refusal ends the grant.
+  - **A customer's own provider:** on a target whose sign-in is the customer's own provider, agent.cloud can't yet ask the provider about a person by `provider_id`. So consent refuses there, saying agents aren't available on this sign-in yet, and agent.cloud keeps the MCP paths gated (its AMCP-12).
+  - `review` (the build adds CONF:mcp-safety)
+- **AMCP-8:** **Point.**
+  - **Pointing:** the badge's "Point for your agent" lets the person click something.
+  - **The pick:** it's posted to `/mcp/agents/point` as `{route, selector, label}`, with labels and never input values, the shape of agent.cloud's live-view picker.
+  - **How long it's kept:** the latest pick per person, for 10 minutes.
+  - **What the agent gets:** the built-in tool `point_get` returns it, inside the data block.
+  - `review` (the build adds CONF:point)
+- **AMCP-9:** **The UI changes the app's data only through `/api/*` routes.** That means only through `web/src/api.ts`: no `fetch`, form action, socket or beacon elsewhere in `web/src`. And `api.ts` calls only routes the server has, so everything a person does is a tool too.
+  - **The exception:** the agents pages' own session-only calls to `/mcp/agents/*` (AMCP-6). They stay out of the tools on purpose. `review` (the build adds LINT:api)
+- **AMCP-10:** **The badge.**
+  - **What it is:** a subtle chip in the welcome page's chip row (APP-9), "Use with your agent", linking to `/agents`.
+  - **When it shows:** while agents can reach the app.
+  - **Hiding it:** the person can hide it in their browser.
+  - `review` (the build adds CONF:badge)
+
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
 - **OBS-1:** Logs go to stdout and stderr as one JSON object per line, with `level` (`debug`, `info`, `warn`, `error`) and `msg`. The platform classifies by `level`; plain text falls back to keyword guessing. `CONF:logs-json` (at least 95% of lines parse, and every line from app code parses)
