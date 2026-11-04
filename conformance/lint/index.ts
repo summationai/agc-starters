@@ -236,6 +236,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-4)');
     const unnamed = ['/admin', '/internal', '/debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-4)`);
+    if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-4, idle-copy)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
