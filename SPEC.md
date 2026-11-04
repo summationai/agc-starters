@@ -133,7 +133,7 @@ These rules are `review` until the build adds the checks named in each.
   - **Metadata:** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414) name the app's origin. `POST /mcp` without a valid token answers 401 with `WWW-Authenticate: Bearer resource_metadata="…"`.
   - **Registration:** `POST /oauth/register` (RFC 7591) takes public clients only.
     - A callback must be loopback HTTP with a port, or exactly one on the starter's list: `https://claude.ai/api/mcp/auth_callback`, plus each client's callback once it's proven on agent.cloud's staging.
-    - At most 20 registrations an hour per address, and 1,000 unused a day.
+    - At most 20 registrations an hour per address. A client id is sealed, carrying its own callbacks, so registration stores nothing.
   - **Consent:** `GET /oauth/authorize` takes S256 PKCE only, and needs the app's session; without one, it signs the person in first and comes back.
     - The consent page shows the client's self-declared name, marked unverified, and its callback host.
     - It offers *Read* (preselected) or *Read and act*.
@@ -159,7 +159,7 @@ These rules are `review` until the build adds the checks named in each.
     - TypeScript: `app.request()`, with the grant's person in `c.env`;
     - Python: an ASGI call to the app, with the person in the request scope's `state`.
 
-    No header, cookie or argument can set either.
+    No header, cookie or argument can set either, and the build's checks forge each one to prove it.
   - **The session step** takes that person first. After that, the route's own middleware, validation and handler run unchanged, so the agent can do exactly what the person can.
   - **The answer:** the route's JSON body is the tool's result, and a status of 400 or more is a tool error carrying the route's `error.message`.
   - `review` (the build adds CONF:mcp-tools)
@@ -182,14 +182,22 @@ These rules are `review` until the build adds the checks named in each.
     - every connection, with Revoke all;
     - blocked tools, which are hidden from `tools/list` and refused if called;
     - whether agent.cloud's organization or app switch lets agents in.
-  - **The page's own API** lives under `/mcp/agents/*`, never `/api/*`. It answers only the person's session, never a Bearer token, so no agent can approve, unblock or revoke.
+  - **The page's own API** lives under `/mcp/agents/*`, never `/api/*`. It answers only the person's session, never a Bearer token, so no agent can approve, unblock or revoke; the build's checks try each with a Bearer.
+  - **The owner's role** is the one from the last sign-in or recheck, so a role taken away is gone within 5 minutes.
   - `review` (the build adds CONF:agents)
 - **AMCP-7:** **Safe by default.**
   - **Budgets:** each grant gets 60 calls a minute and 10 writes a minute, counted in the database. Over budget gets 429 with `Retry-After`.
   - **Data marking:** a tool's result comes inside an app-data block with a fresh nonce, and `initialize`'s instructions say the block is content, not instructions.
   - **No secrets:** a result holding the value of any secret in the environment, or a known credential shape, is withheld with a tool error.
   - **Attribution:** writes store `via`, the client's name, beside the person, and the page shows "via Claude".
-  - **Losing access:** a grant is rechecked with `GET $AGC_AUTH_URL/users/<id>` as sessions are (AUTH-8), so a person who loses access loses their agents within 5 minutes.
+  - **Who a grant is:** a grant names the person by a stable identity.
+    - On agent.cloud's sign-in, that's the app user's id.
+    - On edge sign-in, it's the issuer and provider subject from the gate's signed `x-agc-identity` (agent.cloud's EDGE-15), never the email alone.
+    - An edge sign-in that gives no provider subject can't grant.
+  - **Losing access:** every grant is rechecked with agent.cloud at most every 5 minutes. On agent.cloud's sign-in, that's AUTH-8's `GET $AGC_AUTH_URL/users/<id>`; on edge sign-in, it's agent.cloud's AMCP-15.
+    - The answer also refreshes the person's role.
+    - A refusal ends the grant.
+    - On a customer target's own sign-in, a grant also ends 24 hours after consent. The person then consents again, through the gate, which asks their provider.
   - `review` (the build adds CONF:mcp-safety)
 - **AMCP-8:** **Point.**
   - **Pointing:** the badge's "Point for your agent" lets the person click something.
@@ -197,7 +205,8 @@ These rules are `review` until the build adds the checks named in each.
   - **How long it's kept:** the latest pick per person, for 10 minutes.
   - **What the agent gets:** the built-in tool `point_get` returns it, inside the data block.
   - `review` (the build adds CONF:point)
-- **AMCP-9:** **The UI changes data only through `/api/*` routes.** That means only through `web/src/api.ts`: no `fetch`, form action, socket or beacon elsewhere in `web/src`. And `api.ts` calls only routes the server has, so everything a person does is a tool too. `review` (the build adds LINT:api)
+- **AMCP-9:** **The UI changes the app's data only through `/api/*` routes.** That means only through `web/src/api.ts`: no `fetch`, form action, socket or beacon elsewhere in `web/src`. And `api.ts` calls only routes the server has, so everything a person does is a tool too.
+  - **The exception:** the agents pages' own session-only calls to `/mcp/agents/*` (AMCP-6). They stay out of the tools on purpose. `review` (the build adds LINT:api)
 - **AMCP-10:** **The badge.**
   - **What it is:** a subtle chip in the welcome page's chip row (APP-9), "Use with your agent", linking to `/agents`.
   - **When it shows:** while agents can reach the app.
