@@ -234,7 +234,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     // DOC-7: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
     const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
     if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-7)');
-    const unnamed = ['/admin', '/internal', '/debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
+    const unnamed = ['/admin', '/internal', '/debug', '/_debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-7)`);
     if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-8, idle-copy)');
     if (!text.includes('"Copy <name> has been idle for over a week"')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t name the finding\u2019s title, "Copy <name> has been idle for over a week" (DOC-8)');
@@ -245,6 +245,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const missing = [['one per row', /one per row/], ['an index', /\bindex\b/], ['a job for outside calls', /outside call[^.]*\bjob\b/]].filter(([, re]) => !(re as RegExp).test(slow)).map(([what]) => what);
     if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route`'} (DOC-11)`);
     if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-12)');
+    if (!/^- \*\*A lake query\b.*`lake-unbounded-query`.*"Lake queries read more than they need"/m.test(text)) return fail('AGENTS.md doesn\u2019t say to name a lake query\u2019s columns and bound it, naming the review\u2019s `lake-unbounded-query` and its title (DOC-13)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
