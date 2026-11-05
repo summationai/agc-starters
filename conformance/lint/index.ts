@@ -234,7 +234,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     // DOC-7: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
     const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
     if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-7)');
-    const unnamed = ['/admin', '/internal', '/debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
+    const unnamed = ['/admin', '/internal', '/debug', '/_debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-7)`);
     if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-8, idle-copy)');
     if (!text.includes('"Copy <name> has been idle for over a week"')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t name the finding\u2019s title, "Copy <name> has been idle for over a week" (DOC-8)');
