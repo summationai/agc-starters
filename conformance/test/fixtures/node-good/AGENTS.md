@@ -16,7 +16,7 @@ Once a mirror's work has shipped, delete its copy with `agc down <name> --delete
 ## Say what you're doing
 
 At each step, before you start it, run `agc now "<what you're about to do>"`.
-- **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin, and a smoke flow that calls it before any `SIGN IN` and expects `401|403` proves it.
+- **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/_debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin, and a smoke flow that calls it before any `SIGN IN` and expects `401|403` proves it.
 - **A lake connection** (`ducklake` or `flightsql`): add `GET /api/status`, answering JSON with peak memory and lake timings. Without it, agent.cloud's review files `no-status-route`.
 - **Crashes:** a crash restarts the app in production and fails every request in flight; agent.cloud's review reports that as `restarts`. Keep each error where it belongs, and exit only on SIGTERM.
 - Every route answers in under a second: agent.cloud's review flags a route whose p95 in production passes 1 s (`slow-route`). Fetch what it needs in one query rather than one per row, index what it filters and joins by, and put an outside call in a job rather than make the person wait on it.
