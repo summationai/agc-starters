@@ -13,7 +13,7 @@ CI runs the same thing for every stack on every PR, and a starter that doesn't p
 
 ## Changing the spec
 
-[SPEC.md](SPEC.md) is the contract, and the rules come before the code. Change it in its own PR, or in the PR whose behaviour needs it, and get it reviewed. Every rule names the test that proves it (`LINT:*`, `CONF:*`) or is marked `review`. The suite reads the rules from SPEC.md, and its own tests fail if a rule names a test that doesn't exist, or if a test exists that no rule names. A new rule therefore lands with its test, and with every stack passing it.
+[SPEC.md](SPEC.md) is the contract, and the rules come before the code. Change it in its own PR, or in the PR whose behaviour needs it, and get it reviewed. Every rule names the test that proves it (`LINT:*`, `CONF:*`) or is marked `review`. The suite reads the rules from SPEC.md, and its own tests fail if a rule names a test that doesn't exist, or if a test exists that no rule names, or if two rule lines define the same ID (naming the ID and each line, so parallel PRs that each took the next free ID get renumbered before they merge). A new rule therefore lands with its test, and with every stack passing it.
 
 ## Adding a stack (Rust, Java, Go…)
 
