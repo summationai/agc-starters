@@ -8,9 +8,10 @@ import { parse } from 'smol-toml';
 type Run = 'mirror' | 'private' | 'live' | 'rehearsal' | 'preview' | 'unknown';
 type Database = { state: 'running'; migrations: number; checked_at: string } | { state: 'not verified'; reason: 'unreachable' | 'timeout' | 'query_failed'; checked_at: string };
 
-// The manifest, read once at start: the app's name, whether it has a worker, and how many checks it runs.
+// The manifest, read once at start: the app's name, whether it was started from Start, whether it has a worker, and how
+// many checks it runs.
 const manifest = parse(readFileSync('agentcloud.toml', 'utf8')) as {
-  app?: { name?: string }; service?: { worker?: unknown }; check?: { smoke?: unknown[]; invariant?: unknown[] };
+  app?: { name?: string; started?: unknown }; service?: { worker?: unknown }; check?: { smoke?: unknown[]; invariant?: unknown[] };
 };
 
 // APP-9: where this process runs, first match wins. AGENTCLOUD_MIRROR is agc's; agent.cloud reserves the name, so no
@@ -83,6 +84,8 @@ export async function welcome(env: NodeJS.ProcessEnv = process.env, preview?: st
     app: String(manifest.app?.name ?? ''),
     stack: 'typescript',
     run: runOf(env, preview),
+    // APP-8, APP-15: "live" only when agc init wrote exactly that (an app made through Start); never any other value.
+    started: manifest.app?.started === 'live' ? 'live' as const : null,
     parts: {
       web: 'running', api: 'running', database: db.state,
       worker: manifest.service?.worker ? 'configured' : 'not set up',

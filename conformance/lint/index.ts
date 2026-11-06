@@ -230,7 +230,9 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
     if (!text.includes('agc now "')) return fail('AGENTS.md doesn\u2019t ask the agent to say each step with agc now (DOC-4)');
     if (!/^- \*\*A foreign key:\*\* index it\b.*`unindexed-fk`/m.test(text)) return fail('AGENTS.md doesn\u2019t say to index every foreign key, naming unindexed-fk (DOC-5)');
+    if (!text.includes('`unindexed-fk`, "No index on <table>(<columns>)"')) return fail('AGENTS.md\u2019s unindexed-fk line doesn\u2019t name the finding\u2019s title, "No index on <table>(<columns>)" (DOC-5)');
     if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
+    if (!text.includes('`no-primary-key`, "Table <name> has no primary key"')) return fail('AGENTS.md\u2019s no-primary-key line doesn\u2019t name the finding\u2019s title, "Table <name> has no primary key" (DOC-6)');
     // DOC-7: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
     const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
     if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-7)');
@@ -241,9 +243,9 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('`no-status-route`')) return fail('AGENTS.md doesn\u2019t tell a lake app to serve /api/status (DOC-9)');
     if (!text.includes('reports that as `restarts`')) return fail('AGENTS.md doesn\u2019t say how to avoid the review\u2019s `restarts` finding (DOC-10)');
     // DOC-11: the rule's name, and each of its three causes: a query per row, a missing index, an outside call in the request.
-    const slow = text.split('\n').find((l) => l.includes('(`slow-route`)')) ?? '';
+    const slow = text.split('\n').find((l) => l.includes('(`slow-route`, "<METHOD> <path> is slow")')) ?? '';
     const missing = [['one per row', /one per row/], ['an index', /\bindex\b/], ['a job for outside calls', /outside call[^.]*\bjob\b/]].filter(([, re]) => !(re as RegExp).test(slow)).map(([what]) => what);
-    if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route`'} (DOC-11)`);
+    if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route` and its title, "<METHOD> <path> is slow"'} (DOC-11)`);
     if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-12)');
     if (!/^- \*\*A lake query\b.*`lake-unbounded-query`.*"Lake queries read more than they need"/m.test(text)) return fail('AGENTS.md doesn\u2019t say to name a lake query\u2019s columns and bound it, naming the review\u2019s `lake-unbounded-query` and its title (DOC-13)');
     if (!text.includes('`lake-no-deadline`')) return fail('AGENTS.md doesn\u2019t say to give every lake call a timeout (DOC-14, lake-no-deadline)');
