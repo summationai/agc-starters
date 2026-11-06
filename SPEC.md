@@ -271,7 +271,7 @@ Every starter is the same small app, so the shared UI works with every stack and
 
 These rules bind the starters in this repo, not the apps grown from them: once an agent turns the starter into something else, the welcome page and the notes can go.
 
-- **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns. `LINT:migrations`
+- **APP-1:** A `notes` table with `id uuid`, `user_id uuid`, `title text` (1 to 200 characters) and `created_at`, unique on `(user_id, title)`, and a `users` table keyed on the `user.id` sign-in returns, declared kept for good (`COMMENT ON TABLE users IS 'agc:kept: …'`), so agent.cloud's `agc check` (its CHECK-1) and its review (`unbounded-table`) never name it as a table that only grows. `LINT:migrations`
 - **APP-2:** `GET /api/notes` answers the signed-in person's notes, newest first, as `[{id, title, created_at}]`. Signed out, it answers 401. `CONF:app`
 - **APP-3:** `POST /api/notes {title}` answers 201 with the note. A missing or overlong title gets 400, a title the person already has gets 409, and signed out gets 401. In the same transaction it inserts a `note_email` job, and it logs a `note.created` event for `note:<id>`. `CONF:app`, `CONF:events`
 - **APP-4:** The worker handles `note_email`: it emails the person (when sign-in gave an email) with the key `note-<id>/created`, then logs `note.emailed` for `note:<id>`. `CONF:mail`, `CONF:events`
