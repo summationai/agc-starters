@@ -241,6 +241,9 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-7)`);
     if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-8, idle-copy)');
     if (!text.includes('"Copy <name> has been idle for over a week"')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t name the finding\u2019s title, "Copy <name> has been idle for over a week" (DOC-8)');
+    // DOC-8: the review files a copy by its last use, and each git branch gets its own copy (agent-cloud's idle-copy cycle 2).
+    if (!text.includes('files a copy unused for over a week')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t say the review files a copy unused for over a week (DOC-8)');
+    if (!text.includes('names a mirror after the git branch')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t say `agc up` names a mirror after the git branch, so each branch gets its own copy (DOC-8)');
     if (!text.includes('`no-status-route`')) return fail('AGENTS.md doesn\u2019t tell a lake app to serve /api/status (DOC-9)');
     if (!text.includes('reports that as `restarts`')) return fail('AGENTS.md doesn\u2019t say how to avoid the review\u2019s `restarts` finding (DOC-10)');
     // DOC-11: the rule's name, and each of its three causes: a query per row, a missing index, an outside call in the request.
