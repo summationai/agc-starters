@@ -1,4 +1,5 @@
 CREATE TABLE users (id uuid PRIMARY KEY, email text, created_at timestamptz NOT NULL DEFAULT now());
+COMMENT ON TABLE users IS 'agc:kept: one row per person who signed in';
 CREATE TABLE notes (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL REFERENCES users (id),

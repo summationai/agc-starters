@@ -152,13 +152,14 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const notes = t.get('notes') ?? '';
     const unique = /unique\s*\(\s*user_id\s*,\s*title\s*\)/i.test(notes) || /create\s+unique\s+index[^;]*\bon\s+(?:public\.)?notes\s*\(\s*user_id\s*,\s*title\s*\)/i.test(migrationSql(s));
     const app1 = column(notes, 'id') === 'uuid' && column(notes, 'user_id') === 'uuid' && /^(text|varchar)/.test(column(notes, 'title') ?? '') && !!column(notes, 'created_at') && unique && column(t.get('users') ?? '', 'id') === 'uuid';
+    const kept = /\bcomment\s+on\s+table\s+(?:public\s*\.\s*)?"?users"?\s+is\s+'agc:kept(?::|')/i.test(migrationSql(s));
     return {
       outcome: existsSync(dir) && !misnamed.length ? 'pass' : 'fail',
       evidence: existsSync(dir) ? `${files.length} migration files${misnamed.length ? `; misnamed: ${misnamed.join(', ')}` : ''}` : `no ${s.app.db.migrations}`,
       perRule: {
         'DATA-2': verdict(existsSync(dir) && files.length > 0 && !misnamed.length, misnamed.length ? `misnamed: ${misnamed.join(', ')}` : `${files.length} files, each <digits>_<slug>.sql`),
         'JOB-1': verdict(!!jobs && !jobColumns.length, jobs ? (jobColumns.length ? `jobs lacks ${jobColumns.join(', ')}` : 'jobs has every column AGENTS.md lists') : 'no jobs table'),
-        'APP-1': verdict(app1, `notes: id ${column(notes, 'id')}, user_id ${column(notes, 'user_id')}, title ${column(notes, 'title')}, unique (user_id, title) ${unique}; users.id ${column(t.get('users') ?? '', 'id')}`),
+        'APP-1': verdict(app1 && kept, `notes: id ${column(notes, 'id')}, user_id ${column(notes, 'user_id')}, title ${column(notes, 'title')}, unique (user_id, title) ${unique}; users.id ${column(t.get('users') ?? '', 'id')}; users declared kept ${kept}`),
       },
     };
   },
