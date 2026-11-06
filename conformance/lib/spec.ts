@@ -38,5 +38,5 @@ export function duplicateRules(rules: Rule[]): string[] {
   for (const r of rules) lines.set(r.id, [...(lines.get(r.id) ?? []), r.line]);
   return [...lines]
     .filter(([, at]) => at.length > 1)
-    .map(([id, at]) => `${id} is defined more than once, on lines ${at.join(', ')} of SPEC.md: give the later one the next free ID`);
+    .map(([id, at]) => `${id} is defined more than once, on lines ${at.join(', ')}: give the later one the next free ID`);
 }

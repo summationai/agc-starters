@@ -27,7 +27,7 @@ test('DOC-4 defined twice fails, naming DOC-4 and both lines', () => {
     '- **DOC-4:** A second rule that took the same next free ID. `review`',
   ].join('\n');
   assert.deepEqual(duplicateRules(parseRules(spec)), [
-    'DOC-4 is defined more than once, on lines 3, 5 of SPEC.md: give the later one the next free ID',
+    'DOC-4 is defined more than once, on lines 3, 5: give the later one the next free ID',
   ]);
 });
 
