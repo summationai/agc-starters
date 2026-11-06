@@ -54,6 +54,10 @@ UPDATE jobs SET locked_until = now() + interval '60 seconds', attempts = attempt
              ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 1)
 RETURNING id, kind, payload, attempts"""
 
+# JOB-6: done jobs are kept 30 days, then deleted, so the table doesn't only grow (agent.cloud's review: unbounded-table).
+# The worker runs it when it starts and once a day after; never in a rehearsal.
+PRUNE = "DELETE FROM jobs WHERE done_at < now() - interval '30 days'"
+
 
 def work(job: dict[str, Any]) -> None:
     try:

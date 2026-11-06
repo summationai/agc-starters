@@ -24,7 +24,7 @@ const tag = () => randomBytes(4).toString('hex');
 export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
-  'CONF:keys', 'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:logs-json', 'CONF:error-log',
+  'CONF:keys', 'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:jobs-prune', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
   'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
@@ -596,6 +596,32 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
         : !owned ? 'the second web process never held the job\u2019s lease with its send open'
           : `the web process killed mid-send left its job to the worker, which sent it ${sent.length} time(s)${back ? '' : ' (not within 90 s)'}`);
       set('CONF:jobs-prompt', (ok ? pass : fail)(`with the worker stopped, the web process emailed ${took === undefined ? 'nothing within 5 s' : `in ${(took / 1000).toFixed(1)} s`}; ${second}`));
+    }
+
+    // JOB-6: a worker deletes jobs done over 30 days ago when it starts, keeps newer and unfinished ones, and in a rehearsal
+    // deletes nothing. The jobs no handler knows are due tomorrow, so no worker claims them meanwhile.
+    {
+      const rows = await env.sql<{ id: string }>(`INSERT INTO jobs (kind, payload, run_at, done_at) VALUES
+          ('conformance_prune', '{}', now() - interval '32 days', now() - interval '31 days'),
+          ('conformance_prune', '{}', now() - interval '2 days', now() - interval '1 day'),
+          ('conformance_prune', '{}', now() + interval '1 day', NULL) RETURNING id::text AS id`);
+      const ids = rows.map((r) => r.id);
+      const left = async () => (await env.sql<{ id: string }>('SELECT id::text AS id FROM jobs WHERE id::text = ANY($1)', [ids])).map((r) => r.id);
+      // Started after the rows exist, so its start's delete would see them, and it deletes before its first poll: 2 s after
+      // it's ready (four polls at 0.5 s) it has had its chance.
+      const rehearsal = await env.worker('prune-rehearsal', env.appEnv({ AGC_RUN: 'rehearsal' }));
+      allLogs.push(rehearsal);
+      const polled = await until(30_000, async () => ((await env.logs(rehearsal)).some((l) => l.includes('worker ready')) ? true : undefined), 250);
+      await sleep(2000);
+      const afterRehearsal = await left();
+      await env.stop(rehearsal, 60);
+      const live = await env.worker('prune-live');
+      allLogs.push(live);
+      const gone = await until(30_000, async () => ((await left()).includes(ids[0]!) ? undefined : true), 250);
+      const afterLive = await left();
+      await env.stop(live, 60);
+      const ok = ids.length === 3 && !!polled && afterRehearsal.length === 3 && !!gone && afterLive.length === 2 && !afterLive.includes(ids[0]!);
+      set('CONF:jobs-prune', (ok ? pass : fail)(`of a job done 31 days ago, one done 1 day ago and one not done: ${polled ? `a rehearsal's worker left ${afterRehearsal.length}` : 'the rehearsal\u2019s worker never polled'}; a worker started without AGC_RUN left ${afterLive.length}${gone ? ', the old one deleted' : ', the old one still there after 30 s'}`));
     }
 
     // OBS-3: workflow events for each note, well-formed.
