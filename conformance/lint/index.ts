@@ -249,6 +249,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-12)');
     if (!/^- \*\*A lake query\b.*`lake-unbounded-query`.*"Lake queries read more than they need"/m.test(text)) return fail('AGENTS.md doesn\u2019t say to name a lake query\u2019s columns and bound it, naming the review\u2019s `lake-unbounded-query` and its title (DOC-13)');
     if (!text.includes('`lake-no-deadline`')) return fail('AGENTS.md doesn\u2019t say to give every lake call a timeout (DOC-14, lake-no-deadline)');
+    if (!text.includes('`unguarded-schedule`') || !text.includes('`AGC_RUN`')) return fail('AGENTS.md doesn\u2019t say a lake app\u2019s scheduled jobs skip rehearsals by `AGC_RUN` (DOC-15, `unguarded-schedule`)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 
