@@ -16,7 +16,8 @@ import psycopg
 
 from .db import DATABASE_URL
 
-# The manifest, read once at start: the app's name, whether it has a worker, and how many checks it runs.
+# The manifest, read once at start: the app's name, whether it was started from Start, whether it has a worker, and how
+# many checks it runs.
 _manifest: dict[str, Any] = tomllib.loads(Path("agentcloud.toml").read_text())
 
 
@@ -137,6 +138,8 @@ async def welcome(env: Mapping[str, str], preview: str | None = None) -> dict[st
         "app": "" if name is None else str(name),
         "stack": "python",
         "run": run_of(env, preview),
+        # APP-8, APP-15: "live" only when agc init wrote exactly that (an app made through Start); never any other value.
+        "started": "live" if _manifest.get("app", {}).get("started") == "live" else None,
         "parts": {
             "web": "running",
             "api": "running",
