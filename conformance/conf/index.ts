@@ -28,7 +28,7 @@ export const CONF_TESTS = [
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
   'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
-  'CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge',
+  'CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-prune', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge',
 ] as const;
 
 async function schema(env: Env): Promise<string> {

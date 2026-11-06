@@ -468,3 +468,23 @@ test('AMCP-7: a recheck lease is bounded: an abandoned one is recovered, another
     fake.close();
   }
 });
+
+test('DATA-10: a code exchange deletes each MCP table’s stale rows by name, and keeps the fresh ones', { skip }, async () => {
+  const cookie = await signedIn(SAM);
+  const { rows: [{ id: g }] } = await pool.query<{ id: string }>(`INSERT INTO mcp_grants (id, user_id, subject_iss, subject_id, client_id, client_name, scope, resource, expires_at)
+    VALUES (gen_random_uuid(), $1, 'agent.cloud', $2, 'c', 'Claude', 'act', 'http://localhost/mcp', now() + interval '1 day') RETURNING id`, [SAM, SAM]);
+  for (const [age, v] of [['31 days', 'stale'], ['1 minute', 'fresh']] as const) {
+    await pool.query("INSERT INTO mcp_calls (grant_id, tool, writes, status, at) VALUES ($1, $2, false, 'ok', now() - $3::interval)", [g, `prune-${v}`, age]);
+    await pool.query('INSERT INTO mcp_refresh (token_hash, grant_id, used_at) VALUES ($1, $2, now() - $3::interval)', [`prune-${v}`, g, age]);
+  }
+  for (const [age, v] of [['2 days', 'stale'], ['1 minute', 'fresh']] as const) {
+    await pool.query("INSERT INTO mcp_approvals (id, grant_id, tool, args, args_hash, expires_at) VALUES (gen_random_uuid(), $1, $2, '{}', 'x', now() - $3::interval)", [g, `prune-${v}`, age]);
+    await pool.query("INSERT INTO mcp_points (subject_iss, subject_id, pick, at) VALUES ('test', $1, '{}', now() - $2::interval)", [`prune-${v}`, age]);
+  }
+  await connect(cookie);
+  const left = async (sql: string) => (await pool.query<{ v: string }>(sql)).rows.map((r) => r.v).sort();
+  assert.deepEqual(await left("SELECT tool AS v FROM mcp_calls WHERE tool LIKE 'prune-%'"), ['prune-fresh']);
+  assert.deepEqual(await left("SELECT token_hash AS v FROM mcp_refresh WHERE token_hash LIKE 'prune-%'"), ['prune-fresh']);
+  assert.deepEqual(await left("SELECT tool AS v FROM mcp_approvals WHERE tool LIKE 'prune-%'"), ['prune-fresh']);
+  assert.deepEqual(await left("SELECT subject_id AS v FROM mcp_points WHERE subject_id LIKE 'prune-%'"), ['prune-fresh']);
+});

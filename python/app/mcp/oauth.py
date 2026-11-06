@@ -442,6 +442,13 @@ def mount_oauth(app: FastAPI) -> None:
                 assert g is not None
                 conn.execute("DELETE FROM mcp_nonces WHERE expires_at < now() - interval '1 day'")
                 conn.execute("DELETE FROM mcp_grants WHERE expires_at < now() - interval '30 days'")
+                # DATA-10: each table that records what happens is deleted from by name, never only by a cascade, which the
+                # review never counts. A grant ends within 30 days, so a call or used refresh token older than that is an
+                # ended grant's.
+                conn.execute("DELETE FROM mcp_calls WHERE at < now() - interval '30 days'")
+                conn.execute("DELETE FROM mcp_refresh WHERE used_at < now() - interval '30 days'")
+                conn.execute("DELETE FROM mcp_approvals WHERE expires_at < now() - interval '1 day'")
+                conn.execute("DELETE FROM mcp_points WHERE at < now() - interval '1 day'")
                 log.info("agent connected", user=code["u"], client=client["n"], scope=code["s"])
                 result = _pair(conn, g)
         if result:

@@ -163,6 +163,12 @@ export function oauth(app: Hono<Env>) {
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *`, [randomUUID(), code.u, code.si, code.sp, code.cl, client!.n, code.s, resource, new Date(Date.now() + GRANT_SECONDS * 1000)]);
       await db.query("DELETE FROM mcp_nonces WHERE expires_at < now() - interval '1 day'");
       await db.query("DELETE FROM mcp_grants WHERE expires_at < now() - interval '30 days'");
+      // DATA-10: each table that records what happens is deleted from by name, never only by a cascade, which the review
+      // never counts. A grant ends within 30 days, so a call or used refresh token older than that is an ended grant's.
+      await db.query("DELETE FROM mcp_calls WHERE at < now() - interval '30 days'");
+      await db.query("DELETE FROM mcp_refresh WHERE used_at < now() - interval '30 days'");
+      await db.query("DELETE FROM mcp_approvals WHERE expires_at < now() - interval '1 day'");
+      await db.query("DELETE FROM mcp_points WHERE at < now() - interval '1 day'");
       log.info('agent connected', { user: code.u, client: client!.n, scope: code.s });
       return pair(db, g!);
     });
