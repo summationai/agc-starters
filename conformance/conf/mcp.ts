@@ -75,7 +75,7 @@ export async function mcpTests(env: Env, web: Container, stack: Stack, log: (m: 
   const b = await person(web, 'mcp-b');
   const ga = await connect(web, a);
   if (!ga) {
-    for (const t of ['CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge']) out.set(t, fail('an agent couldn’t connect: register, authorize, consent and the token exchange didn’t complete'));
+    for (const t of ['CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-prune', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge']) out.set(t, fail('an agent couldn’t connect: register, authorize, consent and the token exchange didn’t complete'));
     return out;
   }
 
@@ -138,6 +138,35 @@ export async function mcpTests(env: Env, web: Container, stack: Stack, log: (m: 
     out.set('CONF:mcp-oauth', (ok ? pass : fail)(`metadata ${metaOk ? 'names the app’s origin and S256' : 'incomplete'}; register: a lookalike callback ${evil.status}, Claude’s ${claude.status}, a secret client ${secret.status}, 21 from one address ${burst.slice(0, 20).every((s) => s === 201) ? '20 × 201' : burst.slice(0, 20).join(',')} then ${burst[20]}; `
       + `authorize signed out ${signedOut || 'not to sign-in'}, with plain PKCE ${plainBack ?? 'no error'}; consent signed out ${consentOut.status}, showing the client as "${shown}"; `
       + `a Read code ${first.status} (${readScope}), again ${again.status}, a wrong verifier ${badVerifier.status}; refresh ${refreshed?.status}, replayed ${replay?.status}, then its access token ${killed}; revoke ${revoked?.status}, then ${afterRevoke}`));
+  }
+
+  // DATA-10: a code exchange deletes each MCP table's stale rows by name, and keeps the fresh ones.
+  {
+    const [grant] = await env.sql<{ id: string }>('SELECT id::text AS id FROM mcp_grants WHERE user_id::text = $1 ORDER BY created_at LIMIT 1', [a.id]);
+    // Each table, the column a row is told by, and its insert: $1 that value, $2 how long ago, $3 the grant (by a.id's own).
+    // Stale is 31 days for calls and used refresh tokens (past a grant's 30-day end), and 2 days for approvals and picks.
+    const t = tag(), rows = [
+      ['mcp_calls', 'tool', '31 days', "INSERT INTO mcp_calls (grant_id, tool, writes, status, at) VALUES ($3::uuid, $1, false, 'ok', now() - $2::interval)"],
+      ['mcp_refresh', 'token_hash', '31 days', 'INSERT INTO mcp_refresh (token_hash, grant_id, used_at) VALUES ($1, $3::uuid, now() - $2::interval)'],
+      ['mcp_approvals', 'tool', '2 days', "INSERT INTO mcp_approvals (id, grant_id, tool, args, args_hash, expires_at) VALUES (gen_random_uuid(), $3::uuid, $1, '{}', 'x', now() - $2::interval)"],
+      ['mcp_points', 'subject_id', '2 days', "INSERT INTO mcp_points (subject_iss, subject_id, pick, at) VALUES ('conformance', $1, '{}', now() - $2::interval)"],
+    ] as const;
+    if (grant) {
+      for (const [, , stale, insert] of rows) {
+        const params = (v: string, ago: string) => insert.includes('$3') ? [v, ago, grant.id] : [v, ago];
+        await env.sql(insert, params(`stale-${t}`, stale));
+        await env.sql(insert, params(`fresh-${t}`, '1 minute'));
+      }
+    }
+    const exchanged = Boolean(grant && await connect(web, a));
+    const left: string[] = [];
+    for (const [table, col] of rows) {
+      const kept = (await env.sql<{ v: string }>(`SELECT ${col} AS v FROM ${table} WHERE ${col} IN ($1, $2)`, [`stale-${t}`, `fresh-${t}`])).map((r) => r.v.split('-')[0]);
+      left.push(`${table} ${kept.sort().join('+') || 'none'}`);
+    }
+    const ok = exchanged && left.every((l) => l.endsWith(' fresh'));
+    out.set('CONF:mcp-prune', (ok ? pass : fail)(`${exchanged ? 'after a code exchange' : 'no code exchange completed'}, of a stale and a fresh row each: ${left.join(', ')} left`));
+    log(`${out.get('CONF:mcp-prune')!.outcome.toUpperCase().padEnd(4)} CONF:mcp-prune: ${out.get('CONF:mcp-prune')!.evidence}`);
   }
 
   // AMCP-3, AMCP-4, AMCP-5: the routes are the tools, a call is the route as the person, and destructive calls ask first.

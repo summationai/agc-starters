@@ -887,3 +887,37 @@ def test_amcp_6_on_edge_sign_in_the_owner_is_the_gates_role_on_the_request_on_th
     client.post(
         "/mcp/agents/block", json={"tool": "get_me", "blocked": False}, headers={**gate(edge, "o@edge.test", "po", "owner"), **SAME}
     )
+
+
+@needs_pg
+def test_data_10_a_code_exchange_deletes_each_mcp_tables_stale_rows_by_name_and_keeps_the_fresh_ones() -> None:
+    cookie = signed_in(SAM)
+    g = sql(
+        "INSERT INTO mcp_grants (id, user_id, subject_iss, subject_id, client_id, client_name, scope, resource, expires_at)"
+        " VALUES (gen_random_uuid(), %s, 'agent.cloud', %s, 'c', 'Claude', 'act', 'http://localhost/mcp', now() + interval '1 day')"
+        " RETURNING id",
+        SAM,
+        SAM,
+    )[0]["id"]
+    for age, v in (("31 days", "stale"), ("1 minute", "fresh")):
+        sql(
+            "INSERT INTO mcp_calls (grant_id, tool, writes, status, at) VALUES (%s, %s, false, 'ok', now() - %s::interval)",
+            g,
+            f"prune-{v}",
+            age,
+        )
+        sql("INSERT INTO mcp_refresh (token_hash, grant_id, used_at) VALUES (%s, %s, now() - %s::interval)", f"prune-{v}", g, age)
+    for age, v in (("2 days", "stale"), ("1 minute", "fresh")):
+        sql(
+            "INSERT INTO mcp_approvals (id, grant_id, tool, args, args_hash, expires_at)"
+            " VALUES (gen_random_uuid(), %s, %s, '{}', 'x', now() - %s::interval)",
+            g,
+            f"prune-{v}",
+            age,
+        )
+        sql("INSERT INTO mcp_points (subject_iss, subject_id, pick, at) VALUES ('test', %s, '{}', now() - %s::interval)", f"prune-{v}", age)
+    connect(cookie)
+    assert [r["v"] for r in sql("SELECT tool AS v FROM mcp_calls WHERE tool LIKE 'prune-%%'")] == ["prune-fresh"]
+    assert [r["v"] for r in sql("SELECT token_hash AS v FROM mcp_refresh WHERE token_hash LIKE 'prune-%%'")] == ["prune-fresh"]
+    assert [r["v"] for r in sql("SELECT tool AS v FROM mcp_approvals WHERE tool LIKE 'prune-%%'")] == ["prune-fresh"]
+    assert [r["v"] for r in sql("SELECT subject_id AS v FROM mcp_points WHERE subject_id LIKE 'prune-%%'")] == ["prune-fresh"]
