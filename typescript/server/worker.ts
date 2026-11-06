@@ -5,13 +5,17 @@
 // With nothing to do it backs off (10 s, 20 s, 40 s … up to 10 minutes) and holds no database connection between polls,
 // so the database can go to sleep. A job a request queues doesn't wait for that: the web process runs it just after it
 // answers (JOB-5, jobs.ts), and this loop is its backstop.
+//
+// When it starts and once a day after, it deletes jobs done over 30 days ago (JOB-6), just before a poll, so that never
+// wakes the database on its own. Not in a rehearsal (AGC_RUN=rehearsal).
 import { required } from './env.ts';
-import { claim, work } from './jobs.ts';
+import { claim, prune, work } from './jobs.ts';
 import { log } from './log.ts';
 
 required('DATABASE_URL', 'AGC_EMAIL_URL', 'AGC_EMAIL_TOKEN'); // a missing one stops the worker at once, with its name
 const POLL_S = Number(process.env.WORKER_POLL_SECONDS ?? 10);
 const IDLE_MAX_S = Number(process.env.WORKER_IDLE_MAX_SECONDS ?? 600);
+const DAY_MS = 86_400_000;
 
 let stopping = false;
 let wake: () => void = () => {};
@@ -19,7 +23,13 @@ let wake: () => void = () => {};
 async function main() {
   log.info('worker ready');
   let wait = POLL_S;
+  let pruneAt = Date.now();
   while (!stopping) {
+    if (Date.now() >= pruneAt && process.env.AGC_RUN !== 'rehearsal') {
+      pruneAt = Date.now() + DAY_MS;
+      await prune().then((count) => log.info('deleted jobs done over 30 days ago', { count }),
+        (e) => log.warn('couldn\u2019t delete old done jobs', { error: (e as Error).message }));
+    }
     const job = await claim().catch((e) => { log.warn('couldn’t claim a job', { error: (e as Error).message }); return null; });
     if (job) {
       await work(job);

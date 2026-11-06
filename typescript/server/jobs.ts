@@ -52,6 +52,11 @@ async function claimWith(db: pg.Client): Promise<Job | null> {
   return rows[0] ?? null;
 }
 
+// JOB-6: done jobs are kept 30 days, then deleted, so the table doesn't only grow (agent.cloud's review: unbounded-table).
+// The worker calls it when it starts and once a day after; never in a rehearsal.
+export const prune = (): Promise<number> =>
+  withDb(async (db) => (await db.query("DELETE FROM jobs WHERE done_at < now() - interval '30 days'")).rowCount ?? 0);
+
 export async function work(job: Job) {
   try {
     await withDb(async (db) => {
