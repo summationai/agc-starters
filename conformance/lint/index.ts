@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
 import { lintChecks, readChecks } from '../vendor/agc/checks.ts';
-import { secretIn } from '../vendor/agc/github.ts';
+import { secretIn } from '../vendor/agc/secret-in.ts';
 import { listMigrations } from '../vendor/agc/migrations.ts';
 import { fail, pass, verdict, type TestResult } from '../lib/report.ts';
 import type { Stack } from '../lib/stack.ts';
@@ -39,7 +39,43 @@ export function pageRoutes(s: Stack): string[] {
   return problems;
 }
 
+// AMCP-9: what the UI may call. Only web/src/api.ts talks to the server, and it calls only /api routes the server has,
+// sign-in's /auth/*, and the agents pages' session-only /mcp/agents/* (the stated exception).
+const ROUTE = (p: string) => p.replace(/\$\{[^}]*\}/g, ':p').replace(/\{[^}]*\}/g, ':p').replace(/:[A-Za-z_][A-Za-z0-9_]*/g, ':p').replace(/\?.*$/, '');
+function serverRoutes(s: Stack): Set<string> {
+  const out = new Set<string>();
+  for (const f of sources(s).filter((f) => !f.startsWith('web/'))) {
+    const text = read(s, f);
+    for (const m of text.matchAll(/api\(\s*app\s*,\s*'(get|post|put|patch|delete)'\s*,\s*'([^']+)'/g)) out.add(`${m[1]!.toUpperCase()} ${ROUTE(m[2]!)}`);
+    for (const m of text.matchAll(/\bapp\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/g)) out.add(`${m[1]!.toUpperCase()} ${ROUTE(m[2]!)}`);
+  }
+  return out;
+}
+export function uiCalls(s: Stack): string[] {
+  const problems: string[] = [];
+  const ui = s.files.filter((f) => /^web\/src\/.*\.(ts|tsx|js|jsx)$/.test(f) && !/\.(test|spec)\./.test(f));
+  for (const f of ui.filter((f) => f !== 'web/src/api.ts')) {
+    const text = read(s, f);
+    for (const [what, re] of [['fetch', /\bfetch\s*\(/], ['a WebSocket', /\bnew\s+WebSocket\s*\(/], ['an EventSource', /\bnew\s+EventSource\s*\(/], ['a beacon', /\bsendBeacon\s*\(/],
+      ['XMLHttpRequest', /\bXMLHttpRequest\b/], ['a form action', /<form[^>]*\baction\s*=/]] as const) if (re.test(text)) problems.push(`${f} uses ${what}`);
+  }
+  if (!s.files.includes('web/src/api.ts')) return [...problems, 'no web/src/api.ts'];
+  const routes = serverRoutes(s);
+  const api = read(s, 'web/src/api.ts');
+  for (const m of api.matchAll(/call<[^>]*>\(\s*'(GET|POST|PUT|PATCH|DELETE)'\s*,\s*[`'"]([^`'"]+)[`'"]/g)) {
+    const [method, path] = [m[1]!, ROUTE(m[2]!)];
+    if (path.startsWith('/auth/') || path.startsWith('/mcp/agents')) continue;
+    if (!path.startsWith('/api/')) problems.push(`api.ts calls ${method} ${path}, outside /api`);
+    else if (!routes.has(`${method} ${path}`)) problems.push(`api.ts calls ${method} ${path}, which the server doesn\u2019t have`);
+  }
+  return problems;
+}
+
 export const lint: Record<string, (s: Stack) => TestResult> = {
+  'LINT:api': (s) => {
+    const problems = uiCalls(s);
+    return (problems.length ? fail : pass)(problems.length ? problems.join('; ') : 'only web/src/api.ts calls the server, and only /api routes the server has, /auth/* and /mcp/agents/*');
+  },
   'LINT:manifest': (s) => {
     const web = table(table(s.raw.service).web);
     const worker = table(table(s.raw.service).worker);
@@ -192,7 +228,25 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const text = read(s, 'AGENTS.md');
     if (text.includes('# agent.cloud: how to work on this app')) return fail('AGENTS.md carries agc\u2019s own section; agc init appends it');
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
-    if (!text.includes('`lake-no-deadline`')) return fail('AGENTS.md doesn\u2019t say to give every lake call a timeout (DOC-4, lake-no-deadline)');
+    if (!text.includes('agc now "')) return fail('AGENTS.md doesn\u2019t ask the agent to say each step with agc now (DOC-4)');
+    if (!/^- \*\*A foreign key:\*\* index it\b.*`unindexed-fk`/m.test(text)) return fail('AGENTS.md doesn\u2019t say to index every foreign key, naming unindexed-fk (DOC-5)');
+    if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
+    // DOC-7: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
+    const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
+    if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-7)');
+    const unnamed = ['/admin', '/internal', '/debug', '/_debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
+    if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-7)`);
+    if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-8, idle-copy)');
+    if (!text.includes('"Copy <name> has been idle for over a week"')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t name the finding\u2019s title, "Copy <name> has been idle for over a week" (DOC-8)');
+    if (!text.includes('`no-status-route`')) return fail('AGENTS.md doesn\u2019t tell a lake app to serve /api/status (DOC-9)');
+    if (!text.includes('reports that as `restarts`')) return fail('AGENTS.md doesn\u2019t say how to avoid the review\u2019s `restarts` finding (DOC-10)');
+    // DOC-11: the rule's name, and each of its three causes: a query per row, a missing index, an outside call in the request.
+    const slow = text.split('\n').find((l) => l.includes('(`slow-route`)')) ?? '';
+    const missing = [['one per row', /one per row/], ['an index', /\bindex\b/], ['a job for outside calls', /outside call[^.]*\bjob\b/]].filter(([, re]) => !(re as RegExp).test(slow)).map(([what]) => what);
+    if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route`'} (DOC-11)`);
+    if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-12)');
+    if (!/^- \*\*A lake query\b.*`lake-unbounded-query`.*"Lake queries read more than they need"/m.test(text)) return fail('AGENTS.md doesn\u2019t say to name a lake query\u2019s columns and bound it, naming the review\u2019s `lake-unbounded-query` and its title (DOC-13)');
+    if (!text.includes('`lake-no-deadline`')) return fail('AGENTS.md doesn\u2019t say to give every lake call a timeout (DOC-14, lake-no-deadline)');
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
 

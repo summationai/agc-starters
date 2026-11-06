@@ -11,6 +11,13 @@
 //   GET  /_fake/rechecks                          each GET users/<uuid>: its id and x-agc-session-start (the same)
 //   POST /_fake/users/<uuid>                      {status}: what GET users/<uuid> answers from now on (the same); a 3xx
 //                                                 redirects to GET /_fake/redirected/<uuid>, a 200 also heard as a recheck
+// For agents over MCP (SPEC.md AMCP-*, agent-cloud's app-mcp.md):
+//   GET  /auth/test/<t>/people?iss=&provider_id=  Bearer → { role } or 404: AMCP-15's recheck of an edge-signed person
+//   GET  /auth/test/<t>/mcp-access                Bearer → { on, source }: AMCP-13, whether agents may reach the app
+//   GET  /.well-known/jwks.json                   the keys the suite signs x-agc-identity with (EDGE-15's, faked)
+//   POST /_fake/roles {as, role}                  the role a person's sign-in and recheck answers carry from now on
+//   POST /_fake/people {iss, provider_id, status, role}   what /people answers for one person; GET lists what it was asked
+//   POST /_fake/jwks {keys}, POST /_fake/mcp-access {on, source}
 import { createHash, randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 
@@ -30,6 +37,12 @@ type User = { id: string; email: string | null; name: null; method: 'test'; test
 const codes = new Map<string, { user: User; expires: number; used: boolean }>(); // by the code's hash
 const rechecks: { id: string; session_start: string | null; at: number }[] = [];
 const answers = new Map<string, number>(); // user id → the status its recheck answers, when the suite set one
+const roles = new Map<string, string | null>(); // user id → the role its sign-in and recheck answers say, when set
+const people = new Map<string, { status: number; role: string | null }>(); // `${iss} ${provider_id}` → /people's answer
+const peopleAsked: { iss: string | null; provider_id: string | null; email: string | null; at: number }[] = [];
+let jwks: unknown[] = [];
+let access = { on: true, source: 'org' };
+const withRole = (u: User) => (roles.has(u.id) ? { ...u, role: roles.get(u.id) } : u);
 const mail = new Map<string, { key: string; to: string; subject: string; text: string; attempts: number; first_at: string }>();
 const hash = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -64,6 +77,37 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url ?? '/', 'http://platform');
   const auth = new RegExp(`^/auth/test/${TICKET}/(authorize|token|users/([^/]+)|codes/([^/]+))$`).exec(url.pathname);
   try {
+    if (url.pathname === `/auth/test/${TICKET}/people` && req.method === 'GET') {
+      if (!bearer(req, AUTH_TOKEN)) return error(res, 401, 'auth.token', 'That isn’t this app’s sign-in token.');
+      const iss = url.searchParams.get('iss'), pid = url.searchParams.get('provider_id');
+      peopleAsked.push({ iss, provider_id: pid, email: url.searchParams.get('email'), at: Date.now() });
+      const a = people.get(`${iss} ${pid}`);
+      return a && a.status >= 200 && a.status < 300 ? json(res, a.status, { role: a.role }) : error(res, a?.status ?? 404, 'auth.no_person', 'No one with that issuer and provider id can use this app.');
+    }
+    if (url.pathname === `/auth/test/${TICKET}/mcp-access` && req.method === 'GET') {
+      if (!bearer(req, AUTH_TOKEN)) return error(res, 401, 'auth.token', 'That isn’t this app’s sign-in token.');
+      return json(res, 200, access);
+    }
+    if (url.pathname === '/.well-known/jwks.json' && req.method === 'GET') return json(res, 200, { keys: jwks });
+    if (url.pathname === '/_fake/roles' && req.method === 'POST') {
+      const b = await body(req);
+      const who = identity(String(b.as ?? ''));
+      if (!who) return error(res, 400, 'fake.bad_identity', 'as is an email address or a user id');
+      roles.set(who.id, b.role === null ? null : String(b.role));
+      return json(res, 200, { id: who.id });
+    }
+    if (url.pathname === '/_fake/people' && req.method === 'POST') {
+      const b = await body(req);
+      people.set(`${String(b.iss)} ${String(b.provider_id)}`, { status: Number(b.status ?? 200), role: b.role === undefined || b.role === null ? null : String(b.role) });
+      return json(res, 200, { ok: true });
+    }
+    if (url.pathname === '/_fake/people' && req.method === 'GET') return json(res, 200, { asked: peopleAsked });
+    if (url.pathname === '/_fake/jwks' && req.method === 'POST') { jwks = ((await body(req)).keys as unknown[]) ?? []; return json(res, 200, { ok: true }); }
+    if (url.pathname === '/_fake/mcp-access' && req.method === 'POST') {
+      const b = await body(req);
+      access = { on: b.on === true, source: String(b.source ?? 'org') };
+      return json(res, 200, access);
+    }
     if (auth && auth[1] === 'authorize' && req.method === 'GET') {
       const state = url.searchParams.get('state') ?? '';
       if (!STATE.test(state)) return error(res, 400, 'auth.bad_state', 'state must be 8 to 200 characters of A-Z a-z 0-9 . _ ~ -');
@@ -84,7 +128,7 @@ const server = createServer(async (req, res) => {
       const c = codes.get(hash(String((await body(req)).code ?? '')));
       if (!c || c.used || c.expires < Date.now()) return error(res, 400, 'auth.bad_code', 'That code is unknown, already used or expired.');
       c.used = true;
-      return json(res, 200, { user: c.user });
+      return json(res, 200, { user: withRole(c.user) });
     }
     if (auth && auth[2] && req.method === 'GET') {
       if (!bearer(req, AUTH_TOKEN)) return error(res, 401, 'auth.token', 'That isn’t this app’s sign-in token.');
@@ -95,7 +139,7 @@ const server = createServer(async (req, res) => {
       // A redirect to a place that would let the person in, and that counts as a recheck heard, so following it shows.
       if (answer && answer >= 300 && answer < 400) { res.writeHead(answer, { location: `/_fake/redirected/${auth[2]}` }); return res.end(); }
       if (answer) return error(res, answer, 'fake.unavailable', 'The fake platform was told to fail this recheck.');
-      return UUID.test(auth[2]) ? json(res, 200, { user: { id: auth[2], email: null, name: null, method: 'test', test: true } }) : error(res, 404, 'auth.no_user', 'That isn’t a user id.');
+      return UUID.test(auth[2]) ? json(res, 200, { user: withRole({ id: auth[2], email: null, name: null, method: 'test', test: true }) }) : error(res, 404, 'auth.no_user', 'That isn’t a user id.');
     }
     if (auth && auth[3] && req.method === 'GET') {
       if (!bearer(req, AUTH_TOKEN)) return error(res, 401, 'auth.token', 'That isn’t this app’s sign-in token.');

@@ -49,7 +49,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 `agc up` runs `[service.web] dev` and `[service.worker] dev` with the mirror's environment: `PORT`, `DATABASE_URL`, `AGC_*`, and `AGENTCLOUD_MIRROR` (`packages/cli/src/commands/mirror.ts`).
 
 - **DEV-1:** `dev` serves the whole app, UI and API, on `$PORT`. `CONF:dev-routes` (including same-origin POSTs through any dev proxy, while another origin is still refused under SEC-6)
-- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. The suite makes one untimed warm-up edit first (a first compile can be slow on a cold CI runner), then times the next one. `CONF:reload-api`
+- **DEV-2:** Saving a server source file changes what the API serves within 5 s, with no manual restart. The suite makes one untimed warm-up edit first (a first compile can be slow on a cold CI runner), then times the next one. `CONF:reload-api` (with a connection held open at each save, as a browser preconnects one, so a dev server that waits on open connections before it restarts fails it)
 - **DEV-3:** Saving a UI source file changes what the browser loads within 5 s (hot module reload, or the next page load), with no manual restart. `CONF:reload-ui`
 - **DEV-4:** Saving a worker source file restarts the worker within 5 s. `CONF:reload-worker`
 - **DEV-5:** `dev` needs nothing a fresh clone lacks beyond the language's toolchain: the first run installs dependencies itself, or the README says the one command that does. `CONF:dev-routes` (run from a clean copy)
@@ -65,6 +65,7 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **DATA-6:** Queries are parameterized; no SQL is built from request input by string concatenation. `review`
 - **DATA-7 (SHOULD):** Columns that hold a fixed set of values (a status, a kind) use a `CHECK (col IN (…))` list or an enum. Masking keeps those exactly (`policy.ts`), so mirrors show the real states. `LINT:fixed-values` (reported)
 - **DATA-8 (SHOULD):** The pool keeps idle connections about 60 s, in production and on a mirror alike, holds none at its minimum, and opens at most 10. So a request within a minute of the last reuses a connection instead of opening one. In production each new connection goes out through the platform's NAT with its own TLS handshake; closing idle ones after a second, as before, opened one for nearly every request (agent-cloud ASK-009, rc: "no pooler, only cheap fixes"). On a mirror, from a laptop through agc's proxy, a new connection costs about 1.7 s and a query about 0.25 s. A quiet app sheds its idle connections afterwards, so its database can still sleep (JOB-4: Neon suspends a compute 5 minutes after its last connection closes). The worker never uses this pool: it opens one connection for each poll or job and closes it right after (JOB-4). In TypeScript each idle connection closes 60 s after its last use. Python's pool (psycopg_pool) closes at most one idle connection per 60 s, so after a burst that opened all 10, the last one closes about 11 minutes later; one or two connections, a small app's usual, close within 2 or 3 minutes. `review` (TypeScript: `server/db.test.ts`, Python: `tests/test_db.py`; each loads the pool with and without `AGENTCLOUD_MIRROR`)
+- **DATA-9:** Every table the migrations make has a primary key, and every foreign key an index that starts with its columns, in order. Otherwise agent.cloud's review files `no-primary-key` or `unindexed-fk`, and every ship warns about each. `CONF:keys` (after the migrations, the same catalog queries `agc check` and the rehearsal run, `packages/cli/src/preserve.ts`, find nothing)
 
 ## 6. Platform services
 
@@ -83,14 +84,21 @@ The platform runs `web` as a Deployment with a readiness probe on `health` every
 - **AUTH-6:** No passwords. No password hashing (bcrypt, scrypt, argon2, PBKDF2) anywhere near the word "password" (`agc ship` warns on it). `LINT:no-passwords`
 
 ### Email (`docs/AGENTS.md` "Background work")
-- **MAIL-1:** Email is sent by the worker, never in the request: `POST $AGC_EMAIL_URL` with `Authorization: Bearer $AGC_EMAIL_TOKEN` and `{to, subject, text, key}`. `CONF:mail`
+- **MAIL-1:** Email is sent by a job, never inside a request's response: by the worker, or by the web process just after it has answered (JOB-5): `POST $AGC_EMAIL_URL` with `Authorization: Bearer $AGC_EMAIL_TOKEN` and `{to, subject, text, key}`. `CONF:mail`
 - **MAIL-2:** `key` names the message for good (`note-<uuid>/created`), so a retried job never emails twice. `CONF:mail-once` (a worker killed mid-job: each key arrives once)
 
 ### Background jobs
 - **JOB-1:** A `jobs` table, created by a migration, with the columns in `docs/AGENTS.md`. Work is inserted in the same transaction as the write it belongs to. `LINT:migrations`, `review`
 - **JOB-2:** The worker claims with a lease (`FOR UPDATE SKIP LOCKED`, `locked_until`), so two workers never run one job at the same time, and a dead worker's job runs again. `CONF:jobs-race` (two workers, a batch of jobs, each email key exactly once)
 - **JOB-3:** Every job is safe to run twice. `CONF:mail-once`
-- **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. The trade-off is deliberate: the first email after a quiet spell can take up to ten minutes. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
+- **JOB-4:** An idle worker lets the database sleep (Neon suspends a compute after 5 minutes without connections). The worker listens for nothing (no `LISTEN`), and holds no database connection between polls. It polls every `WORKER_POLL_SECONDS` (default 10) while it finds work. After an empty poll it doubles the wait, up to `WORKER_IDLE_MAX_SECONDS` (default 600), and goes back to the short interval as soon as it finds a job. On its own, that would make the first email after a quiet spell wait up to ten minutes; JOB-5 runs a request's own job at once instead, and the worker's idle poll is the backstop. `CONF:jobs-idle` (with a 0.5 s poll and a 4 s ceiling: the gaps between claims grow while idle and snap back once a job arrives, and the worker holds no connection between polls)
+
+- **JOB-5:** A job a request queues runs at once, not at the worker's next poll (agentcloud-apps/agc-feedback#316: everleaf's first email after a quiet spell took 391 s).
+  - After the web process has sent its response, it claims the job it just committed, with JOB-2's lease, and runs it with the worker's own handler. So the person's request never waits on the job, and the database is only woken by work that's there.
+  - If that run can't finish (the process stops, the lease is already held, or the job fails), the job stays queued and the worker runs it at its next poll, as JOB-4 says. Each job runs at most once at a time and is safe to run twice (JOB-2, JOB-3), so a run in both places sends each email key once (MAIL-2).
+  - The web process never polls, never listens and holds no connection once the run ends, so JOB-4's sleeping database still holds.
+
+  `CONF:jobs-prompt` (with the worker stopped, a note's email arrives within 5 s of its POST; a second web process, whose email service takes the send and never answers, owns the job's lease with its send open and is killed mid-send; the worker, started only then, sends that email once after the lease lapses)
 
 ### Storage (`docs/specs/app-storage.md`: STO-3, STO-6, STO-12; `agc help storage`)
 Files people upload go to the app's bucket through signed URLs, never through the server or into Postgres. Each starter carries the helper an app calls once its `agentcloud.toml` declares `[storage]`; the starter itself declares none. STOR-1 through STOR-7 are proven by the stack's own tests against a fake S3 endpoint with fake keys, which `conformance.toml` names (`[storage] test`, §12) and `CONF:storage` runs. STOR-8 is a documentation review.
@@ -108,6 +116,105 @@ Files people upload go to the app's bucket through signed URLs, never through th
 - **STOR-6:** When `AGC_STORAGE_GATEWAY_URL` is set for a customer AWS target, signed browser POST and GET URLs replace only the `AGC_STORAGE_ENDPOINT` base with that gateway base; the encoded bucket/key path, signature query and POST fields are unchanged. Backend S3 requests still use the endpoint. Without the variable, browser URLs use the endpoint directly (STO-3, STO-8, STO-15). `CONF:storage`
 - **STOR-7:** Before making a 10-minute browser upload policy or a 5-minute download URL, the signer checks that temporary container credentials have at least 11 minutes remaining. It refreshes through the SDK credential chain or refuses a too-short credential. It checks again after the download's HEAD. Static HMAC credentials are unaffected, and backend clients keep their own credential chain (STO-8, STO-15). `CONF:storage`
 - **STOR-8:** Each `STORAGE.md` shows an optional `uploads` migration and authenticated `POST /api/uploads` and `GET /api/uploads/download?key=...` routes. The upload example creates a relative key under the signed-in person's namespace and saves only that key and the owner; bytes go from browser to storage. The download example checks that row's owner before calling `signDownload(key, mayRead)` and returns its 403 or 404 result in the app's error shape. Both responses are `Cache-Control: no-store`. No storage helper runs for a signed-out request or a key another person owns (STO-3, STO-11). The starter installs neither the migration nor these routes. `review`
+
+### Agents over MCP (agent.cloud's `docs/specs/app-mcp.md`; the canvas's `docs/mcp-submission.md`, SUB-1 to SUB-4)
+A person's own agent (Claude, ChatGPT, Codex, Cursor) can do in the app what the person can, after they say yes once.
+- **Where it's served:** the app serves MCP itself, with its own OAuth on its own sign-in, as the canvas does at `canvas.agent.cloud/mcp`.
+- **The tools are the app's own `/api/*` routes.** So a route a builder adds is a tool at its next release, and the builder writes no MCP code.
+- **Where the code lives:** in `server/mcp/` (TypeScript) or `app/mcp/` (Python), with its tables in the migration.
+
+Each rule names the check that proves it, over HTTP against the built app and the fake platform.
+
+- **AMCP-1:** **`POST /mcp` serves MCP.**
+  - **The protocol:** Streamable HTTP, stateless, one JSON answer per request, protocol versions `2025-06-18` and `2025-11-25`.
+  - **Methods:** `initialize`, `ping`, `tools/list` and `tools/call`. A notification gets 202, and `GET /mcp` gets 405.
+  - **The manifest line:** `agentcloud.toml` says `[mcp] server = "app"`, so agent.cloud's edge lets the MCP and OAuth paths through (agent.cloud's AMCP-12).
+  - `CONF:mcp`
+- **AMCP-2:** **The app is its own OAuth server, on its own sign-in.**
+  - **Metadata:** `/.well-known/oauth-protected-resource/mcp` (RFC 9728) and `/.well-known/oauth-authorization-server` (RFC 8414) name the app's origin. `POST /mcp` without a valid token answers 401 with `WWW-Authenticate: Bearer resource_metadata="…"`.
+  - **Registration:** `POST /oauth/register` (RFC 7591) takes public clients only.
+    - A callback must be loopback HTTP with a port, or exactly one on the starter's list: `https://claude.ai/api/mcp/auth_callback`, plus each client's callback once it's proven on agent.cloud's staging.
+    - At most 20 registrations an hour per address. A client id is sealed, carrying its own callbacks, so registration stores nothing.
+  - **Consent:** `GET /oauth/authorize` takes S256 PKCE only, and needs the app's session; without one, it signs the person in first and comes back.
+    - The consent page shows the client's self-declared name, marked unverified, and its callback host.
+    - It offers *Read* (preselected) or *Read and act*.
+    - Allow or Cancel spends the request once.
+  - **Tokens:** `POST /oauth/token` gives the following, and only hashes are stored:
+    - a code that works once, within 60 s;
+    - an access token that lasts 10 minutes;
+    - a refresh token that rotates, with a 30-day absolute end. A replay revokes the grant.
+  - **Revoking:** `POST /oauth/revoke` (RFC 7009).
+  - `CONF:mcp-oauth`
+- **AMCP-3:** **Every `/api/*` route is a tool, read from the framework's own route table.**
+  - **TypeScript:** routes are registered with one helper, which mounts the Hono route with `zValidator`, as before, and records its tool from the same zod schemas: `api(app, 'post', '/api/notes', { summary: 'Add a note', json: NoteIn }, handler)`.
+  - **Python:** the module reads each FastAPI `APIRoute`'s own metadata (path, methods, docstring, and parameters as the in-process `app.openapi()` describes them). `openapi_url` stays `None`.
+  - **Each tool's name** is the method and path: `GET /api/notes/{id}` is `get_notes_by_id`, unless the route names itself.
+  - **Each tool's description** is the route's summary or docstring.
+  - **Each tool's input** is one object: the route's path and query parameters and its JSON body's fields, side by side.
+  - **Opting out:** a route can be left out, but only with a reason: `exclude: '<why>'` (TypeScript), or `openapi_extra={"x-mcp-exclude": "<why>"}` (Python). The starter leaves out `/api/health`, `/api/welcome` and its debug routes.
+  - **Nothing is missed:** an `/api/*` route that's neither a tool nor left out is **missing**. That covers a TypeScript route registered without `api()`, a route without a summary, and a name used twice in one input.
+  - **`GET /mcp/manifest`** answers only `Authorization: Bearer $AGC_AUTH_TOKEN`, with `{tools, excluded, missing}`. That's what agent.cloud's ship receipt diffs (agent.cloud's AMCP-14).
+  - `CONF:mcp-tools` (the starter's manifest has nothing missing). A route added with `api()` becoming a tool with no other edit, and a bare one listed as missing, is proven by each stack's own tests (TypeScript: `server/mcp.test.ts`, Python: `tests/test_mcp.py`).
+- **AMCP-4:** **A tool call runs its route in-process, as the person.**
+  - **How it's called:**
+    - TypeScript: `app.request()`, with the grant's person in `c.env`;
+    - Python: an ASGI call to the app, with the person in the request scope's `state`.
+
+    No header, cookie or argument can set either, and the build's checks forge each one to prove it.
+  - **The session step** takes that person first. After that, the route's own middleware, validation and handler run unchanged, so the agent can do exactly what the person can.
+  - **The answer:** the route's JSON body is the tool's result, and a status of 400 or more is a tool error carrying the route's `error.message`.
+  - `CONF:mcp-tools`
+- **AMCP-5:** **Hints, read grants, and asking first.**
+  - **Hints:**
+    - `GET` is `readOnlyHint`;
+    - `DELETE`, or a route marked `destructive: true`, is `destructiveHint`.
+  - **Read grants:** a *Read* grant lists and calls only `GET` tools.
+  - **A destructive tool asks first:**
+    - the first call runs nothing, and answers with a link to `/agents/approve/<id>` and a sentence for the agent to say;
+    - the person approves there, with their own session;
+    - the same tool with the same arguments, within an hour, then runs once.
+  - **What approves:** nothing the agent sends.
+  - `CONF:mcp-tools`
+- **AMCP-6:** **The `/agents` page holds a person's controls.**
+  - **For everyone:**
+    - how to connect each major agent, with the app's `/mcp` URL;
+    - the person's connected agents, each with its last calls and Revoke. Revoke refuses the very next call.
+  - **For owners** (`role: "owner"` from sign-in, or the edge's role):
+    - every connection, with Revoke all;
+    - blocked tools, which are hidden from `tools/list` and refused if called;
+    - whether agent.cloud's organization or app switch lets agents in.
+  - **The page's own API** lives under `/mcp/agents/*`, never `/api/*`. It answers only the person's session, never a Bearer token, so no agent can approve, unblock or revoke; the build's checks try each with a Bearer.
+  - **The owner's role:**
+    - on agent.cloud's sign-in, it's the role from the last sign-in or recheck, so a role taken away is gone within 5 minutes;
+    - on edge sign-in, it's the gate's `x-agc-user-role` on that very request. The edge empties a client's copy on every route (agent.cloud's ROLE-4) and rechecks it at least once a minute (ROLE-3).
+  - `CONF:agents`
+- **AMCP-7:** **Safe by default.**
+  - **Budgets:** each grant gets 60 calls a minute and 10 writes a minute, counted in the database. Over budget gets 429 with `Retry-After`.
+  - **Data marking:** a tool's result comes inside an app-data block with a fresh nonce, and `initialize`'s instructions say the block is content, not instructions.
+  - **No secrets:** a result holding the value of any secret in the environment, or a known credential shape, is withheld with a tool error.
+  - **Attribution:** writes store `via`, the client's name, beside the person, and the page shows "via Claude".
+  - **Who a grant is:** a grant names the person by a stable identity.
+    - On agent.cloud's sign-in, that's the app user's id.
+    - On edge sign-in, it's the `iss` and `provider_id` claims of the gate's signed `x-agc-identity` (agent.cloud's EDGE-15). The JWT's `sub` is the email, so it never names a grant.
+    - An assertion without `provider_id` can't grant.
+  - **Losing access:** every grant is rechecked with agent.cloud at most every 5 minutes. On agent.cloud's sign-in, that's AUTH-8's `GET $AGC_AUTH_URL/users/<id>`; on edge sign-in, it's agent.cloud's AMCP-15.
+    - The answer also refreshes the person's role.
+    - A refusal ends the grant.
+  - **A customer's own provider:** on a target whose sign-in is the customer's own provider, agent.cloud can't yet ask the provider about a person by `provider_id`. So consent refuses there, saying agents aren't available on this sign-in yet, and agent.cloud keeps the MCP paths gated (its AMCP-12).
+  - `CONF:mcp-safety` (edge sign-in included: the app run with `AGC_AUTH_PROVIDER=edge` and an assertion signed by the fake platform's keys)
+- **AMCP-8:** **Point.**
+  - **Pointing:** the badge's "Point for your agent" lets the person click something.
+  - **The pick:** it's posted to `/mcp/agents/point` as `{route, selector, label}`, with labels and never input values, the shape of agent.cloud's live-view picker.
+  - **How long it's kept:** the latest pick per person, for 10 minutes.
+  - **What the agent gets:** the built-in tool `point_get` returns it, inside the data block.
+  - `CONF:point`
+- **AMCP-9:** **The UI changes the app's data only through `/api/*` routes.** That means only through `web/src/api.ts`: no `fetch`, form action, socket or beacon elsewhere in `web/src`. And `api.ts` calls only routes the server has, so everything a person does is a tool too.
+  - **The exception:** the agents pages' own session-only calls to `/mcp/agents/*` (AMCP-6). They stay out of the tools on purpose. `LINT:api`
+- **AMCP-10:** **The badge.**
+  - **What it is:** a subtle chip in the welcome page's chip row (APP-9), "Use with your agent", linking to `/agents`.
+  - **When it shows:** while agents can reach the app.
+  - **Hiding it:** the person can hide it in their browser.
+  - `CONF:badge` (the chip's place, its answer and the bundle; Hide's localStorage, read from the source, since the suite runs no browser)
 
 ## 7. Observability (`infra/apps/observability/vector.yaml`)
 
@@ -140,7 +247,17 @@ Files people upload go to the app's bucket through signed URLs, never through th
 - **DOC-1:** `README.md` says what the starter is, the one command to run it locally, where the server, worker, UI, migrations and checks live, and how to add an API route and a job. `review`
 - **DOC-2:** `AGENTS.md` holds the stack section only: the commands, the layout, and the stack's idioms for sign-in, email, jobs and events. `agc init` appends agent.cloud's own section after it (`packages/cli/src/commands/init.ts` writeAgentsMd), so the starter's file must not contain agc's heading `# agent.cloud: how to work on this app`. `LINT:agents-md`
 - **DOC-3:** `AGENTS.md` tells the agent to keep business logic in the app's code, not in database triggers, and to use a trigger only for simple per-row bookkeeping such as `updated_at`, with the reason: a trigger hides behaviour from the code a reviewer reads, and agent.cloud's masked copies and migration checks handle triggers poorly. It's guidance; nothing refuses a trigger. agent.cloud's own AGENTS.md says the same (its TRG-1 and TRG-2). `LINT:agents-md`
-- **DOC-4:** `AGENTS.md` tells the agent to give every lake call a timeout, on the lake client or as each call's deadline, and to handle the timeout as a failure the caller sees, naming the rule agent.cloud's review files without one (`lake-no-deadline`). It's guidance; the starters make no lake call. agent.cloud's own AGENTS.md says the same (its recurring-findings.md RFR-10). `LINT:agents-md`
+- **DOC-4:** `AGENTS.md` asks the agent to say what it's about to do at each step with `agc now "<text>"`, one line of up to 120 characters, so the people watching it build an open Work item read its steps in its own words (agent.cloud's LIVE-21). It's a request; nothing refuses a build without it. `LINT:agents-md`
+- **DOC-5:** `AGENTS.md` tells the agent to index every foreign key in the migration that adds it (an index that starts with its columns, in order), with the reason: Postgres doesn't make one, so lookups by the key and deletes from the table it references scan the whole table. It names the rule agent.cloud's review files it under, `unindexed-fk`, as agent.cloud's own AGENTS.md does (its RFR-10). It's guidance; `agc check` and a ship's rehearsal warn, and nothing refuses. `LINT:agents-md`
+- **DOC-6:** `AGENTS.md` tells the agent to give every table a primary key (`id uuid PRIMARY KEY`, or a composite key on a table that links two others), with the reason: without one, duplicate rows can appear and a single row can't be updated or deleted reliably. It names agent.cloud's review rule, `no-primary-key`, which `agc check` and a ship's rehearsal warn about first. It's guidance; nothing refuses such a table. agent.cloud's own AGENTS.md says the same (its RFR-10 and PKEY-1). `LINT:agents-md`
+- **DOC-7:** `AGENTS.md` says admin routes answer only an admin: a route under `/admin`, `/internal`, `/debug`, `/_debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin and refuses anyone else with 401 or 403, and a smoke flow that calls it before any `SIGN IN` proves it. It's guidance; nothing refuses a route. agent.cloud's review files `admin-route-answers` for such a route that answers, and agent.cloud's own AGENTS.md says the same (its RFR-16). `LINT:agents-md`
+- **DOC-8:** `AGENTS.md` tells the agent to delete a mirror's copy once its work has shipped, with `agc down <name> --delete`, since `agc down` alone keeps it and agent.cloud's review files a copy made over a week ago (`idle-copy`), naming the finding's title as agent.cloud's control writes it, "Copy <name> has been idle for over a week". agent.cloud's own AGENTS.md says the same (its RFR-10 and MIRROR-65). `LINT:agents-md`
+- **DOC-9:** `AGENTS.md` tells an app with a lake connection (`ducklake` or `flightsql`) to serve `GET /api/status` with the process's peak memory and the timings of its recent lake calls, in the route's own handler, and no data from the lake, naming the review rule it avoids, `no-status-route`. It's guidance; nothing refuses an app without it. agent.cloud's own AGENTS.md says the same (its RFR-10 and RFR-16). `LINT:agents-md`
+- **DOC-10:** `AGENTS.md` tells the agent how to avoid agent.cloud's review finding `restarts` ("The app restarts unexpectedly"), naming it with the words "reports that as `restarts`": a crash restarts the app in production and fails the requests in flight, so each error stays where it belongs (a route's in the error handler, a job's in the worker's loop, a connection's in an `error` listener where the stack has them), and the app exits only on SIGTERM. agent.cloud's own AGENTS.md says the same (its RFR-10, which keeps a recurring review finding's guidance in every app's AGENTS.md). `LINT:agents-md`
+- **DOC-11:** `AGENTS.md` tells the agent how to keep every route under a second, naming the review rule it avoids, as `` (`slow-route`) ``: one query for what a route needs rather than one per row, an index on what it filters and joins by, and outside calls in a job rather than while the person waits. It's guidance; nothing refuses a slow route. agent.cloud's own AGENTS.md says the same, kept in step with its review's rules by its RFR-10 test. `LINT:agents-md`
+- **DOC-12:** `AGENTS.md` tells the agent to decide how long a new table's rows are needed, and that a table recording things that happen (events, logs, jobs, sessions, notifications) needs code that deletes older rows on a schedule, skipped when `AGC_RUN` is `rehearsal`, or partitions it and drops old partitions, with the reason: a table that only grows makes backups, rehearsals and mirrors larger and its queries slower, and agent.cloud's review files it as `unbounded-table`. It names the starter's own `jobs` table, which keeps every done job. It's guidance; nothing refuses a table. agent.cloud's own AGENTS.md says the same (its RFR-10). `LINT:agents-md`
+- **DOC-13:** `AGENTS.md` tells an app with a lake connection (`ducklake` or `flightsql`) to name a lake query's columns, never `SELECT *`, and bound it with a `WHERE` on the table's partition column or a `LIMIT`, with the reason: a lake table can hold billions of rows, and an unbounded query reads all of them. It names agent.cloud's review rule, `lake-unbounded-query`, and its title as agent.cloud's control writes it, "Lake queries read more than they need", which `agc check` and a ship's rehearsal warn about first. It's guidance; nothing refuses a query. agent.cloud's own AGENTS.md says the same (its RFR-10). `LINT:agents-md`
+- **DOC-14:** `AGENTS.md` tells the agent to give every lake call a timeout, on the lake client or as each call's deadline, and to handle the timeout as a failure the caller sees, naming the rule agent.cloud's review files without one (`lake-no-deadline`). It's guidance; the starters make no lake call. agent.cloud's own AGENTS.md says the same (its recurring-findings.md RFR-10). `LINT:agents-md`
 
 ## 11. The starter app
 
@@ -239,6 +356,16 @@ The welcome page is frame 0 of every app: what a person sees the first time `agc
   Both themes follow `prefers-color-scheme`. Fonts are rc's call for the starter, an exception to agent.cloud's Geist rule for its own pages: Bricolage Grotesque for text and JetBrains Mono for code, on both pages, loaded from Google Fonts as the design does, with system fallbacks so the page reads the same offline. They're set in one CSS variable each, so changing them is a one-line edit.
 
   Motion stays small and never stands between a person and the text: the mark's bars settling, the live dot's pulse, packets along the connectors, the Building ring and the cursor. Under `prefers-reduced-motion: reduce` nothing moves, and the page reads the same with every animation off. `CONF:welcome-copy` (rendered with reduced motion, no element carries an animation; the console link is absent, and the footer names no version; rendered as a mirror with `production.version` `null`, a number, and `production` `null`, the not-released copy appears only for `null`, the released copy only for a number, and neither for `null` production; the Notes page shows no per-note email status), `review` (against the screenshots)
+
+### The app's icon and link preview (APP-14)
+
+- **APP-14:** Every page the starter serves has agent.cloud's icon and link-preview tags in its `<head>`, served in the HTML itself so a link unfurler that runs no JavaScript sees them. This is proposed with agent.cloud's [app-icons spec](https://github.com/summationai/agent-cloud/blob/main/docs/specs/app-icons.md) (agent-cloud#4295) (ICON-7) and isn't built yet, so conformance doesn't check it until the build lands. The tags:
+  - `<link rel="icon" href="/.agc/brand/favicon.ico" sizes="any">`, `<link rel="icon" type="image/svg+xml" href="/.agc/brand/favicon.svg">` and `<link rel="apple-touch-icon" href="/.agc/brand/apple-touch-icon.png">`;
+  - `<link rel="manifest" href="/.agc/brand/site.webmanifest">`;
+  - `og:image` and `twitter:image` (with `twitter:card` set to `summary_large_image`) as the absolute URL `<AGENTCLOUD_APP_URL>/.agc/brand/preview.png`, which the server fills in when it serves the page;
+  - `og:title` and `og:description`, the page's own title and description.
+
+  These are agent.cloud's paths, not the app's files: the starter ships no icon of its own, and agent.cloud serves the app's icon set there (ICON-6). Where `AGENTCLOUD_APP_URL` isn't set, the page leaves out `og:image` and `twitter:image` instead of writing a relative URL. `review` until the build adds its conformance check.
 
 ## 12. The conformance descriptor
 
