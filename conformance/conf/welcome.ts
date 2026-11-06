@@ -1,4 +1,4 @@
-// The welcome page and the Notes example (SPEC.md APP-7 to APP-14).
+// The welcome page and the Notes example (SPEC.md APP-7 to APP-15).
 //   CONF:welcome-copy   the stack's own UI modules, rendered with react-dom/server for every run and production state,
 //                       each as an app set up by hand and as one started from Start
 //   CONF:welcome        GET /api/welcome on the built app: its fields, no secrets, the database probe and its bounds
@@ -75,7 +75,7 @@ const CHIP: Record<string, string> = {
 };
 const NOT_RELEASED = ['reserved, not released', 'Nothing was public when this copy started', 'nothing was released at'];
 const RELEASED = ['agc ship releases a new version there'];
-// APP-14: the words of an app set up by hand, and of one started from Start, whose agent is already building it.
+// APP-15: the words of an app set up by hand, and of one started from Start, whose agent is already building it.
 const BY_HAND = ['is ready to build', 'Tell your agent what to build, and this page becomes your app', 'Tell your agent what to build.'];
 const STARTED = ['is about to be built', "Your agent's first change replaces this page", 'Your agent is on it', 'Work page', "agent.cloud's console"];
 const CHECKED = '2026-10-21T04:00:00.000Z';
@@ -175,7 +175,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       never(p13, `${label} (reduced motion)`, html, /class="[^"]*\bmoving\b/);
       never(p13, `${label} (reduced motion)`, html, /style="[^"]*\banimation(-name)?\s*:/);
       // No console link; the footer names the stack and no version. Only an app started from Start names the console,
-      // in words, as where its build shows (APP-14).
+      // in words, as where its build shows (APP-15).
       never(p13, label, html, /href="[^"]*console/i);
       if (f.started === null) never(p13, label, t, /\bconsole\b/i);
       const footer = /<footer\b[\s\S]*?<\/footer>/.exec(html)?.[0];
@@ -185,7 +185,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
         want(p13, `${label} footer`, ft, starter(s));
         never(p13, `${label} footer`, ft, /\bv?\d+\.\d+(\.\d+)?\b|\bv\d+\b/);
       }
-      // APP-14: the hand-set-up words, or the started-from-Start ones, never a mix.
+      // APP-15: the hand-set-up words, or the started-from-Start ones, never a mix.
       for (const phrase of BY_HAND) (f.started === 'live' ? never : want)(p14, label, t, phrase);
       for (const phrase of STARTED) (f.started === 'live' ? want : never)(p14, label, t, phrase);
       want(p7, label, t, f.started === 'live' ? 'is about to be built' : 'is ready to build');
@@ -249,7 +249,7 @@ export async function welcomeCopy(s: Stack): Promise<TestResult> {
       'APP-7': verdict(!p7.length, p7.length ? p7.join('; ') : '/ renders the welcome page and /notes renders Notes, each with its own text; main.tsx routes both; Notes signs in with return_to=/notes'),
       'APP-9': verdict(!p9.length, p9.length ? p9.join('; ') : 'each run shows exactly its own status words; "Live at" and a done "released" step only when live; private says publish to go live at its address, and no run but live claims the app is public; the mirror\u2019s line follows production'),
       'APP-13': verdict(!p13.length, p13.length ? p13.join('; ') : 'not-released copy only on a reserved mirror, released copy only with a version; nothing animates under reduced motion; no console link; the footer names the stack and no version; Worker and Sign-in say what the facts say; no per-note email status'),
-      'APP-14': verdict(!p14.length, p14.length ? p14.join('; ') : 'started from Start: "about to be built", the agent\u2019s first change replaces the page, "Your agent is on it" and the Work page in agent.cloud\u2019s console, in every run; set up by hand: today\u2019s words and none of those'),
+      'APP-15': verdict(!p14.length, p14.length ? p14.join('; ') : 'started from Start: "about to be built", the agent\u2019s first change replaces the page, "Your agent is on it" and the Work page in agent.cloud\u2019s console, in every run; set up by hand: today\u2019s words and none of those'),
     });
   } catch (e) {
     return fail(`rendering the UI failed: ${(e as Error).message}`);
@@ -311,7 +311,7 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
   const probes = async () => (await env.statements()).filter((st) => st.text.includes(LEDGER)).length;
 
   // APP-8: a manifest with its own name and a secret in the worker's command and in `[app] started`, mounted over the
-  // image's own; and APP-14's, the starter's own with `started = "live"`, as agc init writes it for an app made through Start.
+  // image's own; and APP-15's, the starter's own with `started = "live"`, as agc init writes it for an app made through Start.
   const manifestDir = join(env.tmp, 'welcome');
   mkdirSync(manifestDir, { recursive: true });
   chmodSync(manifestDir, 0o755);
@@ -423,7 +423,7 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     if (parts.web !== 'running' || parts.api !== 'running') p10.push(`web ${parts.web}, api ${parts.api}`);
     if (parts.database !== 'running' || db.migrations !== ledger) p10.push(`database ${parts.database} with ${String(db.migrations)} migrations; the ledger has ${ledger}`);
     if (parts.worker !== 'configured') p10.push(`worker ${parts.worker} with [service.worker] in the manifest`);
-    // APP-8, APP-14: `started` is "live" only for exactly that; the sentinel in `[app] started` is null and never echoed
+    // APP-8, APP-15: `started` is "live" only for exactly that; the sentinel in `[app] started` is null and never echoed
     // (the leak check above), and the starter's own manifest, which has none, is null.
     const startedProblems: string[] = [];
     if (sec.json?.started !== null) startedProblems.push(`started ${JSON.stringify(sec.json?.started)} with a sentinel in [app] started (null)`);
@@ -543,7 +543,7 @@ export async function welcomeApi(env: Env, log: (m: string) => void): Promise<Ma
     if (!(recovered.status === 200 && recovered.ms <= 3000 && rparts.database === 'running')) p10.push(`after the frozen probe expired, database back: ${recovered.status} in ${recovered.ms} ms, ${rparts.database ?? 'no state'}`);
 
     out.set('CONF:welcome', (p8.length || p10.length ? fail : pass)([...p8, ...p10].slice(0, 4).join('; ') || 'the answer, its secrets and its database probe', {
-      'APP-14': verdict(!p14.length, p14.length ? p14.join('; ') : 'started is "live" with started = "live" in the manifest, null with the starter\u2019s own manifest and with a sentinel in [app] started'),
+      'APP-15': verdict(!p14.length, p14.length ? p14.join('; ') : 'started is "live" with started = "live" in the manifest, null with the starter\u2019s own manifest and with a sentinel in [app] started'),
       'APP-8': verdict(!p8.length, p8.length ? p8.join('; ') : `exactly APP-8\u2019s fields in every case; app is the mounted manifest\u2019s ${name}; a sentinel in an env var, AGC_AUTH_URL, the worker\u2019s command and [app] started, and the app\u2019s tokens and database password, appear in no answer`),
       'APP-10': verdict(!p10.length, p10.length ? p10.join('; ') : `database running with ${ledger} migrations (the ledger\u2019s count); frozen: not verified (timeout) in ${frozen.ms} ms, health ${health.status}; ${burstEvidence}; after 60 s frozen: not verified, checked later; frozen probe expired, database back: running in ${recovered.ms} ms; email with one half: not set up; ${signinSeen.join('; ')}`),
     }));

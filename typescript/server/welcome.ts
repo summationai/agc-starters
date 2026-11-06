@@ -84,7 +84,7 @@ export async function welcome(env: NodeJS.ProcessEnv = process.env, preview?: st
     app: String(manifest.app?.name ?? ''),
     stack: 'typescript',
     run: runOf(env, preview),
-    // APP-8, APP-14: "live" only when agc init wrote exactly that (an app made through Start); never any other value.
+    // APP-8, APP-15: "live" only when agc init wrote exactly that (an app made through Start); never any other value.
     started: manifest.app?.started === 'live' ? 'live' as const : null,
     parts: {
       web: 'running', api: 'running', database: db.state,

@@ -15,7 +15,8 @@ const api = getRequestListener(app.fetch);
 
 server.on('request', (req, res) => {
   const path = req.url ?? '/';
-  if (path.startsWith('/api/') || path.startsWith('/auth/')) return void api(req, res);
+  // The API, sign-in, and agents over MCP (/mcp, its OAuth and metadata): the server. Everything else: the UI.
+  if (['/api/', '/auth/', '/mcp', '/oauth/', '/.well-known/oauth-'].some((p) => path.startsWith(p))) return void api(req, res);
   ui.middlewares(req, res, async () => {
     // Not a file Vite serves: a page of the UI.
     const html = await ui.transformIndexHtml(path, readFileSync('web/index.html', 'utf8'));
