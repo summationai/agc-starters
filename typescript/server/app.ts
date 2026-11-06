@@ -1,12 +1,13 @@
-// The app's routes: sign-in, the notes API, health. Shared by the production server (main.ts) and the dev server
-// (dev.ts), which add the UI around it.
-import { zValidator } from '@hono/zod-validator';
+// The app's routes: sign-in, the notes API, health, and agents over MCP. Shared by the production server (main.ts) and
+// the dev server (dev.ts), which add the UI around it.
 import { Hono } from 'hono';
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
 import { signIn, session, type Env } from './auth.ts';
 import { pool, tx } from './db.ts';
+import { runNow } from './jobs.ts';
 import { event, log } from './log.ts';
+import { api, COOKIE_FREE, exclude, mcp } from './mcp/index.ts';
 import { welcome } from './welcome.ts';
 
 export const app = new Hono<Env>();
@@ -19,9 +20,10 @@ app.use(async (c, next) => {
 });
 
 // Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here with
-// this app's cookies; a JSON body would need a CORS preflight, which this app never grants.
+// this app's cookies; a JSON body would need a CORS preflight, which this app never grants. OAuth's token and revoke
+// requests are forms by their standard, and read no cookie: only the code, verifier or token they carry count.
 app.use(async (c, next) => {
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !(c.req.header('content-type') ?? '').startsWith('application/json')) {
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !['/oauth/token', '/oauth/revoke'].includes(c.req.path) && !(c.req.header('content-type') ?? '').startsWith('application/json')) {
     return c.json({ error: { code: 'json_required', message: 'Send a JSON body (Content-Type: application/json).' } }, 415);
   }
   await next();
@@ -33,6 +35,8 @@ app.use(async (c, next) => {
 // curl, a server) isn't a browser and passes on to the session check.
 app.use(async (c, next) => {
   if (['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) return next();
+  // An agent's own client may say where it runs (claude.ai does) on the paths that read no cookie (AMCP-2).
+  if (COOKIE_FREE.includes(c.req.path)) return next();
   const origin = c.req.header('origin');
   const site = c.req.header('sec-fetch-site');
   let ours: boolean;
@@ -47,14 +51,18 @@ app.use(async (c, next) => {
 
 // Health answers as soon as the server can serve, without touching the database: agent.cloud asks every 2 seconds.
 app.get('/api/health', (c) => c.json({ status: 'ok' }));
+exclude('get', '/api/health', 'agent.cloud\u2019s health probe, not something a person does');
 
 // The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
-app.get('/api/welcome', async (c) => c.json(await welcome()));
+app.get('/api/welcome', async (c) => c.json(await welcome(process.env, c.req.header('x-agc-preview'))));
+exclude('get', '/api/welcome', 'the starter\u2019s welcome page facts, which go with the welcome page');
 
-// Only the API and sign-in look up the session: the UI's files never wait on the database.
-app.use('/api/*', session);
-app.use('/auth/*', session);
+// Only the API, sign-in and the agent pages look up the session: the UI's files never wait on the database.
+for (const path of ['/api/*', '/auth/*', '/oauth/authorize', '/mcp/agents/*']) app.use(path, session);
 signIn(app);
+// SPEC.md AMCP-1 to AMCP-10: /mcp, its OAuth, and the /agents pages' API. Every route below that goes through api() is
+// also a tool a person's own agent can call, as that person.
+mcp(app);
 
 const signedIn = (c: { get: (k: 'user') => Env['Variables']['user'] }) => {
   const user = c.get('user');
@@ -62,37 +70,32 @@ const signedIn = (c: { get: (k: 'user') => Env['Variables']['user'] }) => {
   return user;
 };
 
-app.get('/api/me', (c) => c.json({ user: signedIn(c) }));
+api(app, 'get', '/api/me', { summary: 'Who is signed in: their id, email and name.' }, (c) => c.json({ user: signedIn(c) }));
 
-// Every body is checked against its schema before the handler sees it. One that doesn't fit answers 400 in this app's
-// error shape, naming the first problem; one that isn't JSON at all, Hono answers 400 through onError below.
-const body = <T extends z.ZodType>(schema: T) => zValidator('json', schema, (result, c) => {
-  if (!result.success) {
-    const issue = result.error.issues[0];
-    return c.json({ error: { code: 'bad_request', message: issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'The request isn\u2019t valid.' } }, 400);
-  }
-});
+// Every route goes through api(): its body (json) and query are checked against their schemas before the handler sees
+// them, and it's a tool for agents too. A body that doesn't fit answers 400 in this app's error shape, naming the first
+// problem; one that isn't JSON at all, Hono answers 400 through onError below.
+const NoteIn = z.object({ title: z.string().trim().min(1).max(200).describe('The note\u2019s title, 1 to 200 characters') });
 
-const NoteIn = z.object({ title: z.string().trim().min(1).max(200) });
-
-app.get('/api/notes', async (c) => {
+api(app, 'get', '/api/notes', { summary: 'List your notes, newest first: up to 100, each with its id, title, when it was made, and the agent it came through, if any.' }, async (c) => {
   const user = signedIn(c);
-  const { rows } = await pool.query('SELECT id, title, created_at FROM notes WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100', [user.id]);
+  const { rows } = await pool.query('SELECT id, title, created_at, via FROM notes WHERE user_id = $1 ORDER BY created_at DESC, id DESC LIMIT 100', [user.id]);
   return c.json(rows);
 });
 
-app.post('/api/notes', body(NoteIn), async (c) => {
+api(app, 'post', '/api/notes', { summary: 'Add a note with a title. Each new note sends you an email. A title you already have is refused.', json: NoteIn }, async (c, { json: { title } }) => {
   const user = signedIn(c);
-  const { title } = c.req.valid('json');
   try {
-    // The note and the job that emails about it are saved together, or not at all.
-    const note = await tx(async (db) => {
-      const { rows } = await db.query<{ id: string; title: string; created_at: string }>(
-        'INSERT INTO notes (user_id, title) VALUES ($1, $2) RETURNING id, title, created_at', [user.id, title]);
-      await db.query(`INSERT INTO jobs (kind, payload) VALUES ('note_email', $1)`, [{ note_id: rows[0]!.id }]);
-      return rows[0]!;
+    // The note and the job that emails about it are saved together, or not at all. via: the agent, when one wrote it.
+    const { note, job } = await tx(async (db) => {
+      const { rows } = await db.query<{ id: string; title: string; created_at: string; via: string | null }>(
+        'INSERT INTO notes (user_id, title, via) VALUES ($1, $2, $3) RETURNING id, title, created_at, via', [user.id, title, c.get('via')]);
+      const queued = await db.query<{ id: string }>(`INSERT INTO jobs (kind, payload) VALUES ('note_email', $1) RETURNING id`, [{ note_id: rows[0]!.id }]);
+      return { note: rows[0]!, job: queued.rows[0]!.id };
     });
     event('note.created', `note:${note.id}`, { related: [`user:${user.id}`] });
+    // JOB-5: the email goes now, not at the worker's next poll; the answer doesn't wait for it, and the worker is the backstop.
+    setImmediate(() => void runNow(job));
     return c.json(note, 201);
   } catch (e) {
     if ((e as { code?: string }).code === '23505') return c.json({ error: { code: 'duplicate', message: 'You already have a note with that title.' } }, 409);
@@ -100,7 +103,19 @@ app.post('/api/notes', body(NoteIn), async (c) => {
   }
 });
 
+api(app, 'delete', '/api/notes/:id', { summary: 'Delete one of your notes, by its id. It can\u2019t be undone.' }, async (c) => {
+  const user = signedIn(c);
+  const id = c.req.param('id') ?? '';
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return c.json({ error: { code: 'not_found', message: 'No such note.' } }, 404);
+  const { rowCount } = await pool.query('DELETE FROM notes WHERE id = $1 AND user_id = $2', [id, user.id]);
+  if (!rowCount) return c.json({ error: { code: 'not_found', message: 'No such note.' } }, 404);
+  event('note.deleted', `note:${id}`, { related: [`user:${user.id}`] });
+  return c.json({ deleted: id });
+});
+
 // Only for agent.cloud's conformance suite: an error and a slow request, to prove logging and graceful shutdown.
+exclude('get', '/api/debug/error', 'conformance only: a deliberate failure');
+exclude('get', '/api/debug/slow', 'conformance only: a slow request');
 if (process.env.AGENTCLOUD_CONFORMANCE === '1') {
   app.get('/api/debug/error', () => { throw new Error('a deliberate failure, for the conformance suite'); });
   app.get('/api/debug/slow', async (c) => {

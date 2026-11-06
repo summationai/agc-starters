@@ -1,7 +1,8 @@
-"""The app: sign-in, the notes API, health, and in production the built UI (web/dist), all on one port."""
+"""The app: sign-in, the notes API, health, agents over MCP, and in production the built UI (web/dist), all on one port."""
 
 import asyncio
 import os
+import re
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -9,17 +10,18 @@ from typing import Annotated, Any
 from urllib.parse import urlsplit
 
 import psycopg
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import log
+from . import log, mcp
 from .auth import router as auth_router
-from .auth import signed_in
+from .auth import signed_in, via_of
 from .db import pool, tx
+from .jobs import run_now
 from .welcome import welcome as welcome_facts
 
 UI = Path("web/dist")
@@ -51,12 +53,15 @@ def _ours(request: Request) -> bool:
 @app.middleware("http")
 async def guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     # Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here
-    # with this app's cookies; a JSON body would need a CORS preflight, which this app never grants.
-    if request.method not in ("GET", "HEAD", "OPTIONS") and not _ours(request):
+    # with this app's cookies; a JSON body would need a CORS preflight, which this app never grants. OAuth's token and
+    # revoke requests are forms by their standard, and read no cookie: only the code, verifier or token they carry count.
+    # An agent's own client may say where it runs (claude.ai does) on the paths that read no cookie (AMCP-2).
+    unsafe = request.method not in ("GET", "HEAD", "OPTIONS")
+    if unsafe and request.url.path not in mcp.COOKIE_FREE and not _ours(request):
         response: Response = JSONResponse(
             {"error": {"code": "cross_origin", "message": "Changes come from this app\u2019s own pages."}}, 403
         )
-    elif request.method not in ("GET", "HEAD", "OPTIONS") and not request.headers.get("content-type", "").startswith("application/json"):
+    elif unsafe and request.url.path not in mcp.FORM_PATHS and not request.headers.get("content-type", "").startswith("application/json"):
         refusal = {"code": "json_required", "message": "Send a JSON body (Content-Type: application/json)."}
         response = JSONResponse({"error": refusal}, 415)
     else:
@@ -73,31 +78,36 @@ async def guard(request: Request, call_next: Callable[[Request], Awaitable[Respo
 
 
 # Health answers as soon as the server can serve, without touching the database: agent.cloud asks every 2 seconds.
-@app.get("/api/health")
+@app.get("/api/health", openapi_extra=mcp.exclude("agent.cloud\u2019s health probe, not something a person does"))
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
 # The welcome page's facts (SPEC.md APP-8): public like the page, and goes when the welcome page does.
-@app.get("/api/welcome")
-async def welcome() -> dict[str, Any]:
-    return await welcome_facts(os.environ)
+@app.get("/api/welcome", openapi_extra=mcp.exclude("the starter\u2019s welcome page facts, which go with the welcome page"))
+async def welcome(request: Request) -> dict[str, Any]:
+    return await welcome_facts(os.environ, request.headers.get("x-agc-preview"))
 
 
 app.include_router(auth_router)
+# SPEC.md AMCP-1 to AMCP-10: /mcp, its OAuth, and the /agents pages' API. Every /api route below is also a tool a
+# person's own agent can call, as that person: its docstring is what the agent reads (app/mcp/tools.py).
+mcp.mount(app)
 
 
 @app.get("/api/me")
 def me(request: Request) -> dict[str, object]:
+    """Who is signed in: their id, email and name."""
     return {"user": signed_in(request)}
 
 
 @app.get("/api/notes")
 def notes(request: Request) -> list[dict[str, object]]:
+    """List your notes, newest first: up to 100, each with its id, title, when it was made, and the agent it came through, if any."""
     user = signed_in(request)
     with pool.connection() as conn:
         rows = conn.execute(
-            "SELECT id::text AS id, title, created_at FROM notes WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 100",
+            "SELECT id::text AS id, title, created_at, via FROM notes WHERE user_id = %s ORDER BY created_at DESC, id DESC LIMIT 100",
             (user["id"],),
         ).fetchall()
     return [{**r, "created_at": r["created_at"].isoformat()} for r in rows]
@@ -106,39 +116,65 @@ def notes(request: Request) -> list[dict[str, object]]:
 class NoteIn(BaseModel):
     """A new note's body. FastAPI checks it before add_note runs; one that doesn't fit answers 400 (bad_request below)."""
 
-    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+    title: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=200),
+        Field(description="The note\u2019s title, 1 to 200 characters"),
+    ]
 
 
 @app.post("/api/notes", status_code=201)
-async def add_note(request: Request, body: NoteIn) -> Response:
+async def add_note(request: Request, body: NoteIn, background: BackgroundTasks) -> Response:
+    """Add a note with a title. Each new note sends you an email. A title you already have is refused."""
     user = await asyncio.to_thread(signed_in, request)
     try:
-        note = await asyncio.to_thread(_insert_note, user["id"], body.title)
+        note, job_id = await asyncio.to_thread(_insert_note, user["id"], body.title, via_of(request))
     except psycopg.errors.UniqueViolation:
         return JSONResponse({"error": {"code": "duplicate", "message": "You already have a note with that title."}}, 409)
     log.event("note.created", f"note:{note['id']}", related=[f"user:{user['id']}"])
+    # JOB-5: the email goes now, not at the worker's next poll. A background task runs after the response is sent, so the
+    # answer doesn't wait for it, and the worker is the backstop.
+    background.add_task(run_now, job_id)
     return JSONResponse({**note, "created_at": note["created_at"].isoformat()}, 201)
 
 
-def _insert_note(user_id: str, title: str) -> dict[str, Any]:
-    # The note and the job that emails about it are saved together, or not at all.
+def _insert_note(user_id: str, title: str, via: str | None) -> tuple[dict[str, Any], int]:
+    # The note and the job that emails about it are saved together, or not at all. via: the agent, when one wrote it.
     with tx() as conn:
         note = conn.execute(
-            "INSERT INTO notes (user_id, title) VALUES (%s, %s) RETURNING id::text AS id, title, created_at", (user_id, title)
+            "INSERT INTO notes (user_id, title, via) VALUES (%s, %s, %s) RETURNING id::text AS id, title, created_at, via",
+            (user_id, title, via),
         ).fetchone()
         assert note is not None
-        conn.execute("INSERT INTO jobs (kind, payload) VALUES ('note_email', jsonb_build_object('note_id', %s::text))", (note["id"],))
-    return note
+        job = conn.execute(
+            "INSERT INTO jobs (kind, payload) VALUES ('note_email', jsonb_build_object('note_id', %s::text)) RETURNING id", (note["id"],)
+        ).fetchone()
+        assert job is not None
+    return note, job["id"]
+
+
+@app.delete("/api/notes/{id}")
+def delete_note(request: Request, id: str) -> Response:  # noqa: A002 - the path's own name, so the tool reads delete_notes_by_id
+    """Delete one of your notes, by its id. It can\u2019t be undone."""
+    user = signed_in(request)
+    if not re.fullmatch(r"[0-9a-f-]{36}", id, re.I):
+        return JSONResponse({"error": {"code": "not_found", "message": "No such note."}}, 404)
+    with pool.connection() as conn:
+        deleted = conn.execute("DELETE FROM notes WHERE id = %s AND user_id = %s", (id, user["id"])).rowcount
+    if not deleted:
+        return JSONResponse({"error": {"code": "not_found", "message": "No such note."}}, 404)
+    log.event("note.deleted", f"note:{id}", related=[f"user:{user['id']}"])
+    return JSONResponse({"deleted": id})
 
 
 # Only for agent.cloud's conformance suite: an error and a slow request, to prove logging and graceful shutdown.
 if os.environ.get("AGENTCLOUD_CONFORMANCE") == "1":
 
-    @app.get("/api/debug/error")
+    @app.get("/api/debug/error", openapi_extra=mcp.exclude("conformance only: a deliberate failure"))
     def debug_error() -> None:
         raise RuntimeError("a deliberate failure, for the conformance suite")
 
-    @app.get("/api/debug/slow")
+    @app.get("/api/debug/slow", openapi_extra=mcp.exclude("conformance only: a slow request"))
     async def debug_slow(ms: int = 0) -> dict[str, bool]:
         log.info("slow request started")
         await asyncio.sleep(min(ms, 10_000) / 1000)

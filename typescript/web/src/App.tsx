@@ -2,6 +2,7 @@
 // browser is on: where the app runs, what's running, whether it's released. Replace it with your app's own first page;
 // the Notes example lives in Notes.tsx.
 import { type ReactNode, useEffect, useState } from 'react';
+import { AgentBadge } from './Agents.tsx';
 import { api, type PartState, type Welcome as Facts } from './api.ts';
 
 const STACKS = {
@@ -36,7 +37,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
   const run = facts?.run;
   const prod = run === 'mirror' ? facts?.production ?? null : null;
   const unreleased = prod !== null && prod.version === null; // agent.cloud said: never released, as this copy started
-  const where = run === 'live' ? here : prod ? host(prod.url) : null; // the app's address, only when it's known
+  const where = run === 'live' || run === 'private' ? here : prod ? host(prod.url) : null; // the app's address, only when it's known
   const [copied, setCopied] = useState(false);
   const copy = () => void navigator.clipboard?.writeText(PROMPT).then(() => setCopied(true));
   return (
@@ -50,7 +51,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
           <div className="mark" aria-hidden="true">
             {['teal', 'pink', 'orange', 'blue'].map((c, i) => <span className="slot" key={c}><span className="bar" style={{ background: `var(--${c})`, animationDelay: `${i * 0.08}s, ${1.3 + i * 0.2}s` }} /></span>)}
           </div>
-          {facts && <div className="chips up d1">{chips(facts, here, prod)}</div>}
+          {facts && <div className="chips up d1">{chips(facts, here, prod)}<AgentBadge /></div>}
           <h1 id="hero-h" className="title up d2">{app} is ready to build.</h1>
           <p className="lede up d3">
             This is the agent.cloud starter: a web app, an API, a Postgres database and a background worker, wired together{run === 'mirror' ? ' and running on your machine' : ''}.
@@ -98,7 +99,7 @@ export function Welcome({ facts, here, now, moving }: { facts: Facts | null; her
         <section className="running" aria-labelledby="run-h">
           <div className="head">
             <h2 id="run-h">What’s running</h2>
-            <p>{run === 'mirror' ? 'Wired together on your machine.' : run === 'live' ? 'Wired together on agent.cloud.' : 'Wired together.'}</p>
+            <p>{run === 'mirror' ? 'Wired together on your machine.' : run === 'live' || run === 'private' ? 'Wired together on agent.cloud.' : 'Wired together.'}</p>
           </div>
           <ul className="diagram" aria-label="Browser to web to API to Postgres; the worker also uses Postgres">
             <li className="node browser">
@@ -168,6 +169,7 @@ function chips(facts: Facts, here: string, prod: Facts['production']): ReactNode
           ? <span className="chip dashed"><span className="dot hollow" /><span className="mono">{host(prod.url)}</span><span className="muted">reserved, not released when this copy started</span></span>
           : <span className="chip dashed"><span className="dot" />live at<span className="mono">{host(prod.url)}</span><span className="muted">(v{prod.version}) when this copy started · this is your local copy</span></span>}
     </>;
+    case 'private': return <span className="chip dashed"><span className="dot hollow" />Private preview: publish to go live at<span className="mono">{here}</span></span>;
     case 'live': return <span className="chip"><span className="dot live" />Live at<span className="mono">{here}</span></span>;
     case 'rehearsal': return <span className="chip dashed"><span className="dot hollow" />A rehearsal of a release, not live yet.</span>;
     case 'preview': return <span className="chip dashed"><span className="dot hollow" />A preview, not live{facts.preview_expires_at ? <span className="muted">, until {new Date(facts.preview_expires_at).toUTCString()}</span> : null}</span>;

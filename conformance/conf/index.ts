@@ -4,12 +4,14 @@ import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { checkSignInState, invariantResult, readChecks, runFlow } from '../vendor/agc/checks.ts';
+import { noPrimaryKey, unindexedFks } from '../vendor/agc/preserve.ts';
 import { AUTH_TOKEN, type Container, Env } from '../lib/env.ts';
 import { fail, pass, skip, verdict, type TestResult } from '../lib/report.ts';
 import { run, sleep, until } from '../lib/sh.ts';
 import type { Stack } from '../lib/stack.ts';
 import { dev } from './dev.ts';
 import { cookieAttrs, type Jar, req, type Res, signIn, UUID } from './http.ts';
+import { mcpTests } from './mcp.ts';
 import { storageTests } from './storage.ts';
 import { welcomeApi, welcomeCopy } from './welcome.ts';
 
@@ -22,10 +24,11 @@ const tag = () => randomBytes(4).toString('hex');
 export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
   'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
-  'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:logs-json', 'CONF:error-log',
+  'CONF:keys', 'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
   'CONF:recheck-interval', 'CONF:recheck-404', 'CONF:recheck-401', 'CONF:recheck-redirect', 'CONF:recheck-delete-fails', 'CONF:recheck-unreachable',
+  'CONF:mcp', 'CONF:mcp-oauth', 'CONF:mcp-tools', 'CONF:agents', 'CONF:mcp-safety', 'CONF:point', 'CONF:badge',
 ] as const;
 
 async function schema(env: Env): Promise<string> {
@@ -64,6 +67,15 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     await env.startPlatform();
     const applied = await env.migrate();
     opts.log(`applied ${applied.length} migrations`);
+    // DATA-9: what agc check and the rehearsal ask of the schema the migrations made (the CLI's preserve.ts), as a failure here.
+    {
+      const d = env.db();
+      await d.connect();
+      try {
+        const found = [...(await noPrimaryKey(d)), ...(await unindexedFks(d))];
+        set('CONF:keys', found.length ? fail(found.join(' ')) : pass(`after ${applied.length} migrations every table has a primary key, and every foreign key an index`));
+      } finally { await d.end(); }
+    }
     // APP-6: the seed, after the migrations, as agc up runs it on a mirror that starts empty.
     const seedPath = join(stack.dir, 'seed.sql');
     const seedSql = existsSync(seedPath) ? readFileSync(seedPath, 'utf8') : null;
@@ -423,6 +435,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       }
     }
 
+    // AMCP-1 to AMCP-8, AMCP-10: a person's own agent, over MCP.
+    opts.log('agents over MCP\u2026');
+    for (const [k, v] of await mcpTests(env, web, stack, opts.log)) set(k, v);
+
     // MAIL-1, APP-4: the worker emails the person, keyed by the note.
     {
       const got = await until(20_000, async () => {
@@ -474,6 +490,11 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       set('CONF:invariants', (ok ? pass : fail)(results.join('; ') || 'no invariants'));
     }
 
+    // A note and its email job queued straight into the table, as work with no request behind it would be, so the
+    // workers own it: a request's own job the web process runs at once (JOB-5) and would take from them.
+    const queueNote = async (title: string): Promise<string> => (await env.sql<{ id: string }>(`WITH n AS (INSERT INTO notes (user_id, title) SELECT id, $1 FROM users WHERE email = $2 RETURNING id)
+        INSERT INTO jobs (kind, payload) SELECT 'note_email', jsonb_build_object('note_id', id::text) FROM n RETURNING payload->>'note_id' AS id`, [title, who]))[0]?.id ?? '';
+
     // JOB-2: two workers, a batch of notes, each job run exactly once.
     {
       const second = await env.worker('worker2');
@@ -481,9 +502,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       await sleep(3000);
       const ids: string[] = [];
       for (let i = 0; i < 20; i++) {
-        const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Race ${tag()} ${i}` });
-        const id = (r.json as { id?: string } | null)?.id;
-        if (r.status === 201 && id) ids.push(id);
+        const id = await queueNote(`Race ${tag()} ${i}`);
+        if (id) ids.push(id);
       }
       const all = await until(45_000, async () => {
         const m = await env.mail();
@@ -499,9 +519,8 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
     {
       const ids: string[] = [];
       for (let i = 0; i < 5; i++) {
-        const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Crash ${tag()} ${i}` });
-        const id = (r.json as { id?: string } | null)?.id;
-        if (r.status === 201 && id) ids.push(id);
+        const id = await queueNote(`Crash ${tag()} ${i}`);
+        if (id) ids.push(id);
       }
       await sleep(150);
       await env.kill(worker);
@@ -530,8 +549,9 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const idleFrom = Date.now() - 14_000;
       const idle = await env.claims(idleFrom);
       const gaps = idle.slice(1).map((t, i) => (t - idle[i]!) / 1000);
-      const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Idle ${tag()}` });
-      const id = (r.json as { id?: string } | null)?.id ?? '';
+      // A job only the worker runs: queued straight into the table, as one with no request behind it would be. A
+      // request's own job the web process runs at once (JOB-5), so it wouldn't bring the worker back.
+      const id = await queueNote(`Idle ${tag()}`);
       const t0 = Date.now();
       const got = await until(15_000, async () => ((await env.mail()).some((m) => m.key === `note-${id}/created`) ? Date.now() : undefined), 200);
       await sleep(2000);
@@ -541,6 +561,41 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const quiet = held.filter((n) => n === 0).length >= 11; // one sample may land on a poll's own connection
       const ok = grew && quiet && !!got && fast >= 1;
       set('CONF:jobs-idle', (ok ? pass : fail)(`idle gaps between claims: ${gaps.map((g) => g.toFixed(1)).join(', ') || 'none seen'} s (should grow to about 4); worker connections in ${held.filter((n) => n === 0).length} of 12 idle samples: none; a new job emailed ${got ? `${((got - t0) / 1000).toFixed(1)} s` : 'never'} after it was created, then ${fast} quick polls`));
+    }
+
+    // JOB-5: a request's own job runs at once, from the web process, and the worker is its backstop.
+    {
+      // With the worker stopped, only the web process can send the note's email: within 5 s of the answer.
+      await env.stop(worker, 60);
+      const r = await req(env, web, jar, 'POST', '/api/notes', { title: `Prompt ${tag()}` });
+      const id = (r.json as { id?: string } | null)?.id ?? '';
+      const t0 = Date.now();
+      const took = await until(5_000, async () => ((await env.mail()).some((m) => m.key === `note-${id}/created`) ? Date.now() - t0 : undefined), 100);
+      // A second web process whose email service takes the send and never answers. With the worker still stopped, it
+      // owns the job under its lease and its send is open at the service; then it's killed mid-send. Only then does the
+      // worker start: once the lease lapses, it sends that email, once.
+      const hold = await env.heldEmail();
+      const stuck = await env.web('web-stuck', { ...env.appEnv(), AGC_EMAIL_URL: hold.url }, { alias: false });
+      allLogs.push(stuck);
+      const up = await env.ready(stuck, 60_000);
+      const sj: Jar = new Map();
+      const s = up === undefined ? { problem: 'the second web process never became ready' } : await signIn(env, stuck, sj, who);
+      const r2 = s.problem ? undefined : await req(env, stuck, sj, 'POST', '/api/notes', { title: `Backstop ${tag()}` });
+      const id2 = (r2?.json as { id?: string } | null)?.id ?? '';
+      const owned = id2 ? await until(5_000, async () => {
+        const [row] = await env.sql<{ held: boolean; attempts: number }>(`SELECT locked_until > now() AS held, attempts FROM jobs WHERE payload->>'note_id' = $1`, [id2]);
+        return row?.held && row.attempts === 1 && (await hold.held()) >= 1 ? true : undefined;
+      }, 200) : undefined;
+      await env.kill(stuck);
+      await env.start(worker);
+      opts.log('waiting for the killed web process\u2019s lease to lapse (up to 90 s)\u2026');
+      const back = owned ? await until(90_000, async () => ((await env.mail()).some((m) => m.key === `note-${id2}/created`) ? true : undefined), 1000) : undefined;
+      const sent = (await env.mail()).filter((m) => m.key === `note-${id2}/created`);
+      const ok = r.status === 201 && took !== undefined && !s.problem && r2?.status === 201 && !!owned && !!back && sent.length === 1 && sent[0]!.attempts === 1;
+      const second = s.problem ?? (r2?.status !== 201 ? `the second web process answered ${r2?.status}`
+        : !owned ? 'the second web process never held the job\u2019s lease with its send open'
+          : `the web process killed mid-send left its job to the worker, which sent it ${sent.length} time(s)${back ? '' : ' (not within 90 s)'}`);
+      set('CONF:jobs-prompt', (ok ? pass : fail)(`with the worker stopped, the web process emailed ${took === undefined ? 'nothing within 5 s' : `in ${(took / 1000).toFixed(1)} s`}; ${second}`));
     }
 
     // OBS-3: workflow events for each note, well-formed.

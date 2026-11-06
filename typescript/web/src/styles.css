@@ -202,3 +202,16 @@ h2 { margin: 8px 0 0; font-size: clamp(24px, 2.6vw, 30px); line-height: 1.15; fo
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation: none !important; transition: none !important; }
 }
+
+/* People's own agents (SPEC.md AMCP-6 to AMCP-10): the quiet badge, and the /agents pages. */
+.inline { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.agent-badge { opacity: .8; font-size: 12px; }
+.agent-badge:hover, .agent-badge:focus-within { opacity: 1; }
+.agent-badge a { text-decoration: none; }
+.agent-badge button { border: 0; background: none; color: var(--muted); font: inherit; cursor: pointer; padding: 0 2px; text-decoration: underline; text-underline-offset: 3px; }
+.agents-page { padding-top: 32px; padding-bottom: 64px; max-width: 760px; }
+.agents-page section { margin-top: 28px; }
+.agents-page .connect, .agents-page .consent { padding: 20px; }
+.agents-page .connect code { overflow-wrap: anywhere; }
+.agents-page fieldset { border: 0; padding: 0; display: grid; gap: 8px; margin: 12px 0; }
+.agents-page pre { background: var(--code); padding: 12px; border-radius: 8px; overflow-x: auto; font-size: 13px; }

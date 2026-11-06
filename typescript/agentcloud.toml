@@ -28,3 +28,6 @@ steps = [
 [[check.invariant]]
 name = "a title once per person"
 sql  = "SELECT user_id, title FROM notes GROUP BY user_id, title HAVING count(*) > 1"
+
+[mcp]
+server = "app"      # this app serves MCP at /mcp, its own OAuth on its own sign-in (SPEC.md AMCP-1); people's agents use its /api routes as tools

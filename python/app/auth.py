@@ -6,6 +6,7 @@ Sessions are rows in the database (only a hash of the token is stored) and last 
 at most once every 5 minutes (SPEC.md AUTH-8)."""
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -69,14 +70,15 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
     if not email:
         return None
     name = (request.headers.get("x-agc-user-name") or "").strip() or None
+    role = "owner" if request.headers.get("x-agc-user-role") == "owner" else "member"
     user_id = _id_of(email)
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO users (id, email, name) VALUES (%s, %s, %s)"
-            " ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()",
-            (user_id, email, name),
+            "INSERT INTO users (id, email, name, role) VALUES (%s, %s, %s, %s)"
+            " ON CONFLICT (id) DO UPDATE SET name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role, last_seen_at = now()",
+            (user_id, email, name, role),
         )
-    return {"id": user_id, "email": email, "name": name}
+    return {"id": user_id, "email": email, "name": name, "role": role}
 
 
 # AUTH-8: is this session still let in? Asked of agent.cloud at most once every 5 minutes per session, with when the
@@ -93,6 +95,9 @@ def _edge_user(request: Request) -> dict[str, Any] | None:
 _asking: dict[str, Future[bool]] = {}  # session token hash -> the recheck under way
 
 
+_NO_ROLE = object()  # a recheck that named no role
+
+
 def _recheck(key: str, user_id: str, started: float) -> bool:
     with pool.connection() as conn:
         claimed = conn.execute(
@@ -104,8 +109,9 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
     if not claimed:
         return _settled(key)  # another request or process is asking, or just answered
     status: int | None = None
+    role: object = _NO_ROLE  # AMCP-6: a 2xx's user.role, when it says one, replaces the stored role
     try:
-        # The status is the answer: the body is never read, so a slow one can't hold the session's requests.
+        # The status is the answer. Only a 2xx's body is read, and at most 16 KiB of it, for the role.
         with httpx.stream(
             "GET",
             f"{AUTH_URL}/users/{user_id}",
@@ -114,6 +120,18 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
             follow_redirects=False,
         ) as r:
             status = r.status_code
+            if 200 <= status < 300:
+                body, deadline = b"", time.monotonic() + 5  # a whole-answer deadline for the body, unlike httpx's per-read one
+                for chunk in r.iter_bytes():
+                    body += chunk
+                    if len(body) > 16384 or time.monotonic() > deadline:
+                        break
+                try:
+                    user = json.loads(body).get("user")
+                except (ValueError, AttributeError):
+                    user = None
+                if isinstance(user, dict) and "role" in user:
+                    role = user["role"]
     except httpx.HTTPError as e:
         log.warn("session recheck unanswered, keeping the session", user=user_id, error=type(e).__name__)
     if status is None or status >= 500 or 200 <= status < 300:
@@ -121,6 +139,8 @@ def _recheck(key: str, user_id: str, started: float) -> bool:
             log.warn("session recheck unanswered, keeping the session", user=user_id, status=status)
         with pool.connection() as conn:  # the next ask is 5 minutes on
             conn.execute("UPDATE sessions SET checked_at = now() WHERE token_hash = %s", (key,))
+            if role is not _NO_ROLE:
+                conn.execute("UPDATE users SET role = %s WHERE id = %s", (role if role in ("owner", "member") else None, user_id))
         return True
     # Ended before anyone waiting hears it, so no request after this one finds the session. If it can't be deleted, it's
     # marked refused; if that fails too, the claim's 'infinity' stays, which lets no one in either.
@@ -171,7 +191,23 @@ def _still_let_in(key: str, user_id: str, started: float) -> bool:
         _asking.pop(key, None)
 
 
+def _agent(request: Request) -> dict[str, Any] | None:
+    """AMCP-4: a tool call the MCP module runs in-process carries its person in the request scope's state, which nothing
+    from the network can set: {"user": ..., "via": <the agent's name>}."""
+    agent = getattr(request.state, "agc_mcp", None)
+    return agent if isinstance(agent, dict) else None
+
+
+def via_of(request: Request) -> str | None:
+    """The agent a request came through (AMCP-7), or None for the person's own browser."""
+    agent = _agent(request)
+    return agent["via"] if agent else None
+
+
 def current_user(request: Request) -> dict[str, Any] | None:
+    agent = _agent(request)
+    if agent:
+        return agent["user"]
     if EDGE:
         return _edge_user(request)
     token = request.cookies.get(SESSION)
@@ -180,7 +216,7 @@ def current_user(request: Request) -> dict[str, Any] | None:
     key = _hash(token)
     with pool.connection() as conn:
         row = conn.execute(
-            "SELECT u.id::text AS id, u.email, u.name, s.expires_at,"
+            "SELECT u.id::text AS id, u.email, u.name, u.role, s.expires_at,"
             " s.checked_at = 'infinity' OR coalesce(s.checked_at, s.expires_at - interval '1 day') <= now() - interval '5 minutes' AS due"
             " FROM sessions s JOIN users u ON u.id = s.user_id"
             " WHERE s.token_hash = %s AND s.expires_at > now() AND s.checked_at IS DISTINCT FROM '-infinity'",
@@ -191,6 +227,11 @@ def current_user(request: Request) -> dict[str, Any] | None:
     due, started = row.pop("due"), row.pop("expires_at").timestamp() - DAY  # a session began a day before it expires
     if (due or key in _asking) and not _still_let_in(key, row["id"], started):
         return None
+    if due:  # a recheck may have changed the role (AMCP-6)
+        with pool.connection() as conn:
+            fresh = conn.execute("SELECT role FROM users WHERE id = %s", (row["id"],)).fetchone()
+        if fresh:
+            row["role"] = fresh["role"]
     return row
 
 
@@ -231,9 +272,10 @@ def callback(request: Request, code: str = "", state: str = "") -> Response:
     token = secrets.token_urlsafe(32)
     with pool.connection() as conn:
         conn.execute(
-            "INSERT INTO users (id, email, name) VALUES (%s, %s, %s) ON CONFLICT (id) DO UPDATE"
-            " SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), last_seen_at = now()",
-            (user["id"], user.get("email"), user.get("name")),
+            "INSERT INTO users (id, email, name, role) VALUES (%s, %s, %s, %s) ON CONFLICT (id) DO UPDATE"
+            " SET email = coalesce(EXCLUDED.email, users.email), name = coalesce(EXCLUDED.name, users.name), role = EXCLUDED.role,"
+            " last_seen_at = now()",
+            (user["id"], user.get("email"), user.get("name"), user.get("role") if user.get("role") in ("owner", "member") else None),
         )
         conn.execute(
             "INSERT INTO sessions (token_hash, user_id, expires_at) VALUES (%s, %s, now() + interval '1 day')",
