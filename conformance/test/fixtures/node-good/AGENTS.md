@@ -10,6 +10,7 @@ This fixture stands in for a real stack section. It explains the commands, the l
 Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, and agent.cloud's review files a copy made over a week ago (`idle-copy`, "Copy <name> has been idle for over a week").
 
 - **Business logic:** keep it in the app's code, not in database triggers. Use a trigger only for simple per-row bookkeeping, such as setting `updated_at`: a trigger hides behaviour from the code a reviewer reads, and agent.cloud's masked copies and migration checks handle triggers poorly.
+- **A lake call:** give the lake client a timeout, or each call a deadline, and handle the timeout as a failure the caller sees; agent.cloud's review files a call with neither as `lake-no-deadline`.
 - **A foreign key:** index it in the migration that adds it. Postgres doesn't make one, so lookups by it scan the whole table; agent.cloud's review files one without as `unindexed-fk`, "No index on <table>(<columns>)".
 - **A primary key on every table:** `id uuid PRIMARY KEY`, or `PRIMARY KEY (a, b)` on a table that links two others. Without one, duplicate rows can appear and a single row can't be updated or deleted reliably. `agc check` and a ship's rehearsal warn about a table with none, before agent.cloud's review files it (`no-primary-key`, "Table <name> has no primary key").
 
