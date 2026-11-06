@@ -7,7 +7,7 @@ This fixture stands in for a real stack section. It explains the commands, the l
 This fixture stands in for a real stack section. It explains the commands, the layout, sign-in, email, jobs and events.
 This fixture stands in for a real stack section. It explains the commands, the layout, sign-in, email, jobs and events.
 
-Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, and agent.cloud's review files a copy made over a week ago (`idle-copy`, "Copy <name> has been idle for over a week").
+Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, and agent.cloud's review files a copy unused for over a week (`idle-copy`, "Copy <name> has been idle for over a week"). `agc up` names a mirror after the git branch, so each git branch you run it on gets its own copy: delete each once its work has shipped.
 
 - **Business logic:** keep it in the app's code, not in database triggers. Use a trigger only for simple per-row bookkeeping, such as setting `updated_at`: a trigger hides behaviour from the code a reviewer reads, and agent.cloud's masked copies and migration checks handle triggers poorly.
 - **A lake call:** give the lake client a timeout, or each call a deadline, and handle the timeout as a failure the caller sees; agent.cloud's review files a call with neither as `lake-no-deadline`.
