@@ -14,8 +14,6 @@ Once a mirror's work has shipped, delete its copy with `agc down <name> --delete
 - **A foreign key:** index it in the migration that adds it. Postgres doesn't make one, so lookups by it scan the whole table; agent.cloud's review files one without as `unindexed-fk`, "No index on <table>(<columns>)".
 - **A primary key on every table:** `id uuid PRIMARY KEY`, or `PRIMARY KEY (a, b)` on a table that links two others. Without one, duplicate rows can appear and a single row can't be updated or deleted reliably. `agc check` and a ship's rehearsal warn about a table with none, before agent.cloud's review files it (`no-primary-key`, "Table <name> has no primary key").
 - **A scheduled job on a lake app:** on an app granted a lake connection, it checks `AGC_RUN` and skips its work when it's `rehearsal`; agent.cloud's review files `unguarded-schedule` otherwise.
-- **A foreign key:** index it in the migration that adds it. Postgres doesn't make one, so lookups by it scan the whole table; agent.cloud's review files one without as `unindexed-fk`.
-- **A primary key on every table:** `id uuid PRIMARY KEY`, or `PRIMARY KEY (a, b)` on a table that links two others. Without one, duplicate rows can appear and a single row can't be updated or deleted reliably. `agc check` and a ship's rehearsal warn about a table with none, before agent.cloud's review files it (`no-primary-key`).
 
 ## Say what you're doing
 
