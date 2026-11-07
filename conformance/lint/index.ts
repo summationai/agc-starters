@@ -258,7 +258,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('`unguarded-schedule`') || !text.includes('`AGC_RUN`')) return fail('AGENTS.md doesn\u2019t say a lake app\u2019s scheduled jobs skip rehearsals by `AGC_RUN` (DOC-15, `unguarded-schedule`)');
     // DOC-16: act for the person and report in outcomes, as agent.cloud's own AGENTS.md opens (its ORI-4).
     const talking = text.split('\n## Talking to your person\n')[1]?.split('\n## ')[0] ?? '';
-    const unsaid = ['never runs agc or a terminal', 'means do it, then report', 'Ask only when agc returns a decision for a person', 'at most three plain lines', '`data.tell_person`, post it word for word'].filter((w) => !talking.includes(w));
+    const unsaid = ['never runs agc or a terminal', 'means do it, then report', 'Ask only when agc returns a decision for a person', 'says to get their yes (a brought app\'s port plan)', 'their request leaves a choice open', 'at most three plain lines', '`data.tell_person`, post it word for word'].filter((w) => !talking.includes(w));
     if (unsaid.length) return fail(`AGENTS.md has no "Talking to your person" part saying ${unsaid.join('; ')} (DOC-16)`);
     return text.trim().length > 400 ? pass(`a ${text.split('\n').length}-line stack section`) : fail('AGENTS.md is too short to explain the stack');
   },
