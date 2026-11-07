@@ -1,5 +1,11 @@
 # Starter: TypeScript
 
+## Talking to your person
+
+Your person never runs agc or a terminal: you do, for them. "How do I ship it?" means do it, then report. Ask only when agc returns a decision for a person. Report in at most three plain lines, then one link. When agc's answer carries `data.tell_person`, post it word for word.
+
+## The stack
+
 This fixture stands in for a real stack section. It explains the commands, the layout, sign-in, email, jobs and events.
 This fixture stands in for a real stack section. It explains the commands, the layout, sign-in, email, jobs and events.
 This fixture stands in for a real stack section. It explains the commands, the layout, sign-in, email, jobs and events.

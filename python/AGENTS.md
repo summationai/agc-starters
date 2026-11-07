@@ -2,6 +2,10 @@
 
 A FastAPI API on uvicorn and a React UI (Vite), served together on `$PORT`. There's a worker for background jobs, and Postgres through psycopg 3 in plain SQL. Python 3.12 with uv; the UI is the same one the TypeScript stack uses.
 
+## Talking to your person
+
+Your person never runs agc or a terminal: you do, for them. "How do I ship it?" (or fix it, or deploy it) means do it, then report; never answer with the steps. Ask only when agc returns a decision for a person. Report in at most three plain lines (what happened; what's next, with an ETA; what they must do, usually nothing), then one link, with no commands, JSON, file paths, PR numbers or build states unless they ask. When agc's answer carries `data.tell_person`, post it word for word.
+
 ## Commands
 
 ```text
