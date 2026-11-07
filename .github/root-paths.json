@@ -1,20 +1,11 @@
 {
-  "about": "RAC-19's list for agc-starters, read from main by root Crew's builder and merger (agent-runtime-v2 #415). Crew may change and merge any path but these: workflows and this file are denied, so only a person changes them. Held, so Crew may prepare a change but a person merges it (rc, 1 Nov 2026): SPEC.md, the contract every starter and every app follows; and each stack's dependencies and base images (package manifests and lockfiles, npm settings, Python's pyproject.toml and uv.lock, Dockerfiles), since every new app copies the starters and a change there is a supply-chain change.",
+  "about": "RAC-19's list for agc-starters, read from main by root Crew's builder and merger. Wave 2 (rc, 6 Nov 2026: \"very very little guardrails, i mean it! go ultra lenient\"; only agent.cloud staff contribute, so it guards against mistakes, not evasion). Nothing is denied. Held for a person is this file alone, Crew's fence here. Secure, merged once a security reviewer approves the PR's exact head (RINF-11): the workflows (.github/**). Everything else, SPEC.md and each stack's dependencies and base images included, is product, on Crew's normal gate. Root's Crew must read `secure` before this file names it (RINF-10).",
   "version": 2,
-  "deny": [
-    ".github/**"
-  ],
+  "deny": [],
   "hold": [
-    "SPEC.md",
-    "**/package.json",
-    "**/package-lock.json",
-    "**/npm-shrinkwrap.json",
-    "**/.npmrc",
-    "**/.nvmrc",
-    "**/pyproject.toml",
-    "**/uv.lock",
-    "**/Dockerfile",
-    "**/Dockerfile.*",
-    "**/.dockerignore"
+    ".github/root-paths.json"
+  ],
+  "secure": [
+    ".github/**"
   ]
 }
