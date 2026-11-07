@@ -231,6 +231,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('not in database triggers')) return fail('AGENTS.md doesn\u2019t say to keep business logic out of database triggers (DOC-3)');
     if (!text.includes('agc now "')) return fail('AGENTS.md doesn\u2019t ask the agent to say each step with agc now (DOC-4)');
     if (!/^- \*\*A foreign key:\*\* index it\b.*`unindexed-fk`/m.test(text)) return fail('AGENTS.md doesn\u2019t say to index every foreign key, naming unindexed-fk (DOC-5)');
+    if (!/^- \*\*A foreign key:\*\*.*A table that links two others needs one for each: its `PRIMARY KEY \([^)]+\)` covers/m.test(text)) return fail('AGENTS.md\u2019s foreign-key line doesn\u2019t say a link table\u2019s composite primary key covers its first key only (DOC-5)');
     if (!text.includes('`unindexed-fk`, "No index on <table>(<columns>)"')) return fail('AGENTS.md\u2019s unindexed-fk line doesn\u2019t name the finding\u2019s title, "No index on <table>(<columns>)" (DOC-5)');
     if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
     if (!text.includes('`no-primary-key`, "Table <name> has no primary key"')) return fail('AGENTS.md\u2019s no-primary-key line doesn\u2019t name the finding\u2019s title, "Table <name> has no primary key" (DOC-6)');
