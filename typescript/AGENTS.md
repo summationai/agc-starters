@@ -4,7 +4,7 @@ A React UI (Vite) and one Node 24 server (Hono) that serves the UI and the API o
 
 ## Talking to your person
 
-Your person never runs agc or a terminal: you do, for them. "How do I ship it?" (or fix it, or deploy it) means do it, then report; never answer with the steps. Ask only when agc returns a decision for a person. Report in at most three plain lines (what happened; what's next, with an ETA; what they must do, usually nothing), then one link, with no commands, JSON, file paths, PR numbers or build states unless they ask. When agc's answer carries `data.tell_person`, post it word for word.
+Your person never runs agc or a terminal: you do, for them. "How do I ship it?" (or fix it, or deploy it) means do it, then report; never answer with the steps. Ask only when agc returns a decision for a person (exit 10, with a `decision`), when its `next` says to get their yes (a brought app's port plan), or when their request leaves a choice open; the rest of getting it live is yours. Report in at most three plain lines (what happened; what's next, with an ETA; what they must do, usually nothing), then one link, with no commands, JSON, file paths, PR numbers or build states unless they ask. When agc's answer carries `data.tell_person`, post it word for word.
 
 ## Commands
 

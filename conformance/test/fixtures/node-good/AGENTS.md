@@ -2,7 +2,7 @@
 
 ## Talking to your person
 
-Your person never runs agc or a terminal: you do, for them. "How do I ship it?" means do it, then report. Ask only when agc returns a decision for a person. Report in at most three plain lines, then one link. When agc's answer carries `data.tell_person`, post it word for word.
+Your person never runs agc or a terminal: you do, for them. "How do I ship it?" means do it, then report. Ask only when agc returns a decision for a person, when its `next` says to get their yes (a brought app's port plan), or when their request leaves a choice open. Report in at most three plain lines, then one link. When agc's answer carries `data.tell_person`, post it word for word.
 
 ## The stack
 
