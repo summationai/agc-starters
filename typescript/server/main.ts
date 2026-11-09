@@ -12,8 +12,11 @@ const { PORT } = required('PORT');
 const index = readFileSync('web/dist/index.html', 'utf8');
 
 app.use('/*', serveStatic({ root: 'web/dist' }));
-// Any other path is a page of the UI: it routes on the client, so a reload anywhere still loads the app.
-app.get('*', (c) => c.html(index));
+// Any other path is a page of the UI: it routes on the client, so a reload anywhere still loads the app. PROC-2: except an
+// admin-looking path (agent.cloud's review files admin-route-answers for one that answers 2xx), which is no page until the
+// app adds one: a route in app.ts, or, for a UI page there, its name taken out of this list (and an admin guard on its API).
+const NOT_PAGES = /^\/(admin|internal|debug|_debug|manage|dashboard)(\/|$)/i;
+app.get('*', (c) => NOT_PAGES.test(c.req.path) ? c.json({ error: { code: 'not_found', message: 'No such page.' } }, 404) : c.html(index));
 
 const server = serve({ fetch: app.fetch, port: Number(PORT), hostname: '0.0.0.0' }, () => log.info('listening', { port: Number(PORT) }));
 
