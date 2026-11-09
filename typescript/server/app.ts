@@ -22,8 +22,15 @@ app.use(async (c, next) => {
 // Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here with
 // this app's cookies; a JSON body would need a CORS preflight, which this app never grants. OAuth's token and revoke
 // requests are forms by their standard, and read no cookie: only the code, verifier or token they carry count.
+// DOC-7: on an admin-looking path, a change that carries no credentials at all is refused 401 first, so a smoke flow's
+// first step (no body, no headers) gets the refusal agent.cloud's review counts as proof, not this 415.
+const ADMIN = /^\/(api\/)?(admin|internal|debug|_debug|manage|dashboard)(\/|$)/i;
 app.use(async (c, next) => {
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(c.req.method) && !['/oauth/token', '/oauth/revoke'].includes(c.req.path) && !(c.req.header('content-type') ?? '').startsWith('application/json')) {
+  if (['GET', 'HEAD', 'OPTIONS'].includes(c.req.method)) return next();
+  if (ADMIN.test(c.req.path) && !c.req.header('cookie') && !c.req.header('authorization') && !c.req.header('x-agc-user-email')) {
+    return c.json({ error: { code: 'unauthorized', message: 'Sign in first.' } }, 401);
+  }
+  if (!['/oauth/token', '/oauth/revoke'].includes(c.req.path) && !(c.req.header('content-type') ?? '').startsWith('application/json')) {
     return c.json({ error: { code: 'json_required', message: 'Send a JSON body (Content-Type: application/json).' } }, 415);
   }
   await next();

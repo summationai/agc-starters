@@ -43,6 +43,15 @@ def test_changes_need_a_json_body() -> None:
     assert r.status_code == 415
 
 
+def test_doc_7_a_bare_change_on_an_admin_path_is_401_before_the_415() -> None:
+    bare = TestClient(app)
+    for method in ["POST", "PUT", "PATCH", "DELETE"]:
+        assert bare.request(method, "/api/admin/users").status_code == 401, method
+    assert bare.post("/internal/jobs").status_code == 401
+    assert bare.post("/api/notes").status_code == 415, "other paths keep SEC-4's 415"
+    assert bare.post("/api/admin/users", headers={"cookie": "x=1"}).status_code == 415, "a caller with credentials gets SEC-4's 415"
+
+
 def test_unknown_api_paths_answer_json_404() -> None:
     r = client.get("/api/no-such-route")
     assert r.status_code == 404

@@ -50,17 +50,23 @@ def _ours(request: Request) -> bool:
     return site in (None, "same-origin", "none")
 
 
+ADMIN = re.compile(r"^/(api/)?(admin|internal|debug|_debug|manage|dashboard)(/|$)", re.IGNORECASE)
+
+
 @app.middleware("http")
 async def guard(request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
     # Changes need a JSON body. Apps on agent.cloud share a site, so a neighbour's page could post a plain form here
     # with this app's cookies; a JSON body would need a CORS preflight, which this app never grants. OAuth's token and
     # revoke requests are forms by their standard, and read no cookie: only the code, verifier or token they carry count.
     # An agent's own client may say where it runs (claude.ai does) on the paths that read no cookie (AMCP-2).
+    # DOC-7: on an admin-looking path, a change that carries no credentials at all is refused 401 first, so a smoke
+    # flow's first step (no body, no headers) gets the refusal agent.cloud's review counts as proof, not the 415.
     unsafe = request.method not in ("GET", "HEAD", "OPTIONS")
-    if unsafe and request.url.path not in mcp.COOKIE_FREE and not _ours(request):
-        response: Response = JSONResponse(
-            {"error": {"code": "cross_origin", "message": "Changes come from this app\u2019s own pages."}}, 403
-        )
+    bare = not any(request.headers.get(h) for h in ("cookie", "authorization", "x-agc-user-email"))
+    if unsafe and bare and ADMIN.match(request.url.path):
+        response: Response = JSONResponse({"error": {"code": "unauthorized", "message": "Sign in first."}}, 401)
+    elif unsafe and request.url.path not in mcp.COOKIE_FREE and not _ours(request):
+        response = JSONResponse({"error": {"code": "cross_origin", "message": "Changes come from this app\u2019s own pages."}}, 403)
     elif unsafe and request.url.path not in mcp.FORM_PATHS and not request.headers.get("content-type", "").startswith("application/json"):
         refusal = {"code": "json_required", "message": "Send a JSON body (Content-Type: application/json)."}
         response = JSONResponse({"error": refusal}, 415)
