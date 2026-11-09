@@ -201,6 +201,12 @@ if UI.is_dir():
     app.mount("/assets", StaticFiles(directory=UI / "assets"), name="assets")
 
 
+# PROC-2: an admin-looking path (agent.cloud's review files admin-route-answers for one that answers 2xx) is no page until
+# the app adds one: a route above this one, or, for a UI page there, its name taken out of this list (and an admin guard
+# on its API).
+NOT_PAGES = re.compile(r"^(admin|internal|debug|_debug|manage|dashboard)(/|$)", re.IGNORECASE)
+
+
 @app.get("/{path:path}", include_in_schema=False)
 def page(path: str) -> Response:
     if path.startswith("api/") or path == "api":
@@ -208,6 +214,8 @@ def page(path: str) -> Response:
     file = UI / path
     if path and file.is_file() and UI.resolve() in file.resolve().parents:
         return FileResponse(file)
+    if NOT_PAGES.match(path):
+        return JSONResponse({"error": {"code": "not_found", "message": "No such page."}}, 404)
     if not (UI / "index.html").is_file():
         return JSONResponse({"error": {"code": "no_ui", "message": "The UI isn't built: run npm run build."}}, 404)
     return FileResponse(UI / "index.html", media_type="text/html")
