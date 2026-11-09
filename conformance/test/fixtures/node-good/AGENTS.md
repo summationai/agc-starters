@@ -24,7 +24,7 @@ Once a mirror's work has shipped, delete its copy with `agc down <name> --delete
 ## Say what you're doing
 
 At each step, before you start it, run `agc now "<what you're about to do>"`.
-- **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/_debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin, and a smoke flow that calls it before any `SIGN IN` and expects `401|403` proves it.
+- **Admin routes answer only an admin.** A route under `/admin`, `/internal`, `/debug`, `/_debug`, `/manage` or `/dashboard`, or the same under `/api/`, checks that the signed-in person is an admin. agent.cloud's review counts every 2xx on these paths, an admin's own visits included. The UI's page counts too: answer 404 on these paths unless the app has a page there. Prove each with a flow of its own with no `headers`, whose first step, before any `SIGN IN`, expects only `401|403`.
 - **A lake connection** (`ducklake` or `flightsql`): add `GET /api/status`, answering JSON with peak memory and lake timings. Without it, agent.cloud's review files `no-status-route`.
 - **Crashes:** a crash restarts the app in production and fails every request in flight; agent.cloud's review reports that as `restarts`. Keep each error where it belongs, and exit only on SIGTERM.
 - **Bad input:** answers 4xx, never 5xx: agent.cloud's review files `server-errors`, "Requests fail with server errors, most on <METHOD> <path>", once over 1% of a day's requests in production answer 5xx.
