@@ -390,7 +390,10 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       const form = await req(env, web, jar, 'POST', '/api/notes', `title=${encodeURIComponent(title)}`, { 'content-type': 'application/x-www-form-urlencoded' });
       const after = await req(env, web, jar, 'GET', '/api/notes');
       const madeIt = Array.isArray(after.json) && (after.json as { title?: string }[]).some((n) => n.title === title);
-      set('CONF:csrf-json', (form.status === 415 && !madeIt ? pass : fail)(`a form post answered ${form.status}${madeIt ? ' and created a note' : ', nothing created'}`));
+      // DOC-7: a change on an admin-looking path that carries no credentials is refused 401 before the 415, so a smoke
+      // flow's bodyless first step proves the route refuses.
+      const bare = await req(env, web, new Map(), 'POST', '/api/admin/conformance');
+      set('CONF:csrf-json', (form.status === 415 && !madeIt && bare.status === 401 ? pass : fail)(`a form post answered ${form.status}${madeIt ? ' and created a note' : ', nothing created'}; a bare POST /api/admin/conformance answered ${bare.status}`));
 
       // SEC-6: a sibling app's page can't change anything, even with a JSON body and this app's cookies.
       const own = new URL(env.base(web)).origin;
