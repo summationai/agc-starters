@@ -6,6 +6,7 @@ import asyncio
 import os
 import re
 import socket
+import sys
 import time
 import tomllib
 from collections.abc import Callable, Iterator
@@ -46,6 +47,18 @@ def test_unknown_api_paths_answer_json_404() -> None:
     r = client.get("/api/no-such-route")
     assert r.status_code == 404
     assert r.headers["content-type"].startswith("application/json")
+
+
+def test_proc_2_admin_looking_paths_are_no_page_and_others_are_the_ui(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    (tmp_path / "index.html").write_text("<!doctype html><title>ui</title>")
+    monkeypatch.setattr(sys.modules["app.main"], "UI", tmp_path)
+    for path in ["/notes/x/deep", "/administrator", "/dashboards", "/my/admin"]:
+        r = client.get(path)
+        assert (r.status_code, r.text) == (200, "<!doctype html><title>ui</title>"), path
+    for path in ["/admin", "/internal", "/debug", "/_debug", "/manage", "/dashboard", "/dashboard/x", "/Admin/", "/api/admin"]:
+        r = client.get(path)
+        assert r.status_code == 404, path
+        assert r.headers["content-type"].startswith("application/json"), path
 
 
 def test_signed_out_is_401() -> None:

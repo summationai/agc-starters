@@ -152,15 +152,18 @@ export async function conform(stack: Stack, opts: { dev: boolean; log: (m: strin
       set('CONF:bind', (r.code === 0 ? pass : fail)(r.code === 0 ? `another container reached http://app:${stack.app.web.port}/api/health` : `another container couldn\u2019t reach the app on 0.0.0.0:$PORT (${r.out.trim().slice(0, 200) || `exit ${r.code}`})`));
     }
 
-    // PROC-2: one port, the UI at /, the API under /api, client routes survive a reload.
+    // PROC-2: one port, the UI at /, the API under /api, client routes survive a reload, and admin-looking paths are no page.
     {
       const jar: Jar = new Map();
       const root = await req(env, web, jar, 'GET', '/');
       const api404 = await req(env, web, jar, 'GET', `/api/no-such-route-${tag()}`);
       const deep = await req(env, web, jar, 'GET', `/notes/${tag()}/deep`);
+      const adminPaths = ['/admin', '/internal', '/debug', '/_debug', '/manage', '/dashboard', `/dashboard/${tag()}`];
+      const admin = await Promise.all(adminPaths.map(async (p) => [p, (await req(env, web, jar, 'GET', p)).status] as const));
+      const answered = admin.filter(([, s]) => s !== 404).map(([p, s]) => `${p} ${s}`);
       const html = (r: typeof root) => r.status === 200 && (r.headers.get('content-type') ?? '').includes('text/html');
-      const ok = html(root) && api404.status === 404 && (api404.headers.get('content-type') ?? '').includes('json') && html(deep) && deep.text === root.text;
-      set('CONF:routes', (ok ? pass : fail)(`/ ${root.status} ${root.headers.get('content-type')}; unknown /api path ${api404.status} ${api404.headers.get('content-type')}; a client route ${deep.status}${deep.text === root.text ? ' (the UI)' : ' (not the UI)'}`));
+      const ok = html(root) && api404.status === 404 && (api404.headers.get('content-type') ?? '').includes('json') && html(deep) && deep.text === root.text && !answered.length;
+      set('CONF:routes', (ok ? pass : fail)(`/ ${root.status} ${root.headers.get('content-type')}; unknown /api path ${api404.status} ${api404.headers.get('content-type')}; a client route ${deep.status}${deep.text === root.text ? ' (the UI)' : ' (not the UI)'}; admin-looking paths ${answered.length ? `not 404: ${answered.join(', ')}` : `all 404 (${adminPaths.length})`}`));
 
       // SEC-3 (SHOULD): nosniff everywhere, frame-ancestors on HTML.
       const health = await req(env, web, jar, 'GET', '/api/health');
