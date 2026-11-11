@@ -11,6 +11,10 @@ import { NOT_ON_MIRROR, signDownload, signUpload } from './storage.ts';
 const SECRET = 'fake-secret-for-tests';
 const seen: { method: string; path: string; query: URLSearchParams }[] = [];
 const held = new Set<string>(); // "/<bucket>/<key>" the fake bucket holds
+// How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, a missing bucket's 404
+// NoSuchBucket, or a 403 refusal.
+let deleteMissing: 'S3' | 'GCS' | 'no-bucket' | 'refuse' = 'S3';
+const s3Error = (code: string) => `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${code}</Message></Error>`;
 let s3: Server;
 let endpoint = '';
 
@@ -20,7 +24,12 @@ before(async () => {
     const path = decodeURIComponent(url.pathname);
     seen.push({ method: req.method ?? '', path, query: url.searchParams });
     if (req.method === 'HEAD') return res.writeHead(held.has(path) ? 200 : 404).end();
-    if (req.method === 'DELETE') { held.delete(path); return res.writeHead(204).end(); }
+    if (req.method === 'DELETE') {
+      if (!held.delete(path) && deleteMissing === 'GCS') return res.writeHead(404, { 'content-type': 'application/xml' }).end(s3Error('NoSuchKey'));
+      if (deleteMissing === 'no-bucket') return res.writeHead(404, { 'content-type': 'application/xml' }).end(s3Error('NoSuchBucket'));
+      if (deleteMissing === 'refuse') return res.writeHead(403, { 'content-type': 'application/xml' }).end(s3Error('AccessDenied'));
+      return res.writeHead(204).end();
+    }
     res.writeHead(400).end();
   });
   await new Promise<void>((r) => s3.listen(0, '127.0.0.1', r));
@@ -37,7 +46,7 @@ function env(over: Record<string, string> = {}) {
   for (const n of NAMES) delete process.env[n];
   Object.assign(process.env, BASE, { AGC_STORAGE_ENDPOINT: endpoint }, over);
 }
-beforeEach(() => { seen.length = 0; held.clear(); env(); });
+beforeEach(() => { seen.length = 0; held.clear(); deleteMissing = 'S3'; env(); });
 
 const hmac = (key: string | Buffer, data: string) => createHmac('sha256', key).update(data).digest();
 
@@ -176,6 +185,27 @@ test('STOR-4: in a rehearsal, delete touches only its own prefix, never producti
   env({ AGC_STORAGE_BUCKET: 'agc-staging-0123456789abcdef-r', AGC_STORAGE_PREFIX: 'op_1/task_2/', AGC_STORAGE_FALLBACK_BUCKET: 'agc-staging-0123456789abcdef-p' });
   await storage.delete('k9/receipt.png');
   assert.deepEqual(seen.map((s) => `${s.method} ${s.path}`), ['DELETE /agc-staging-0123456789abcdef-r/op_1/task_2/k9/receipt.png']);
+});
+
+test('STOR-4: delete of a key that isn\u2019t there succeeds on every target: S3\u2019s 204 and GCS\u2019s 404 NoSuchKey', async () => {
+  for (const target of ['S3', 'GCS'] as const) {
+    deleteMissing = target;
+    seen.length = 0;
+    await storage.delete('k1/never-uploaded.pdf'); // a delete before an upload
+    held.add('/agc-staging-0123456789abcdef-d/mirror-one/k1/scan.pdf');
+    await storage.delete('k1/scan.pdf');
+    await storage.delete('k1/scan.pdf'); // a second delete of the same key
+    assert.equal(seen.filter((s) => s.method === 'DELETE').length, 3, target);
+    assert.equal(held.size, 0, target);
+  }
+});
+
+test('STOR-4: only NoSuchKey is success: a missing bucket\u2019s 404 NoSuchBucket, and any other error, still throws', async () => {
+  for (const [answer, status, code] of [['no-bucket', 404, 'NoSuchBucket'], ['refuse', 403, 'AccessDenied']] as const) {
+    deleteMissing = answer;
+    await assert.rejects(storage.delete('k1/scan.pdf'), (e: { name?: string; $metadata?: { httpStatusCode?: number } }) =>
+      e.name === code && e.$metadata?.httpStatusCode === status);
+  }
 });
 
 test('STOR-1: without [storage] there\u2019s no bucket, and the helper says what to declare', async () => {

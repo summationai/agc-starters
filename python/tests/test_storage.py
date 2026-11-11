@@ -14,13 +14,16 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import pytest
-from botocore.exceptions import BotoCoreError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from app import storage
 
 SECRET = "fake-secret-for-tests"  # noqa: S105
 seen: list[tuple[str, str, str]] = []  # (method, path, query)
 held: set[str] = set()  # "/<bucket>/<key>" the fake bucket holds
+# How the fake answers a DELETE of a key it doesn't hold: S3's 204, GCS's 404 NoSuchKey, a missing bucket's 404
+# NoSuchBucket, or a 403 refusal.
+delete_missing = {"as": "S3"}
 
 
 class FakeS3(BaseHTTPRequestHandler):
@@ -36,9 +39,25 @@ class FakeS3(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_DELETE(self) -> None:
-        held.discard(self._record())
+        path = self._record()
+        missing = path not in held
+        held.discard(path)
+        if missing and delete_missing["as"] == "GCS":
+            return self._error(404, "NoSuchKey")
+        if delete_missing["as"] == "no-bucket":
+            return self._error(404, "NoSuchBucket")
+        if delete_missing["as"] == "refuse":
+            return self._error(403, "AccessDenied")
         self.send_response(204)
         self.end_headers()
+
+    def _error(self, status: int, code: str) -> None:
+        body = f'<?xml version="1.0" encoding="UTF-8"?><Error><Code>{code}</Code><Message>{code}</Message></Error>'.encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/xml")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def do_GET(self) -> None:
         self._record()
@@ -101,6 +120,7 @@ def env(monkeypatch: pytest.MonkeyPatch, endpoint: str):
 
     seen.clear()
     held.clear()
+    delete_missing["as"] = "S3"
     set_env()
     return set_env
 
@@ -282,6 +302,28 @@ def test_sto4_a_rehearsal_deletes_only_in_its_own_prefix(env) -> None:
     env(AGC_STORAGE_BUCKET=REH, AGC_STORAGE_PREFIX="op_1/task_2/", AGC_STORAGE_FALLBACK_BUCKET=PROD)
     storage.delete("k9/receipt.png")
     assert [(m, p) for m, p, _ in seen] == [("DELETE", f"/{REH}/op_1/task_2/k9/receipt.png")]
+
+
+@pytest.mark.parametrize("target", ["S3", "GCS"])
+def test_sto4_delete_of_a_key_that_isnt_there_succeeds_on_every_target_s3_204_and_gcs_404_nosuchkey(env, target: str) -> None:
+    delete_missing["as"] = target
+    storage.delete("k1/never-uploaded.pdf")  # a delete before an upload
+    held.add(f"/{DEV}/mirror-one/k1/scan.pdf")
+    storage.delete("k1/scan.pdf")
+    storage.delete("k1/scan.pdf")  # a second delete of the same key
+    assert [m for m, _, _ in seen] == ["DELETE"] * 3
+    assert held == set()
+
+
+@pytest.mark.parametrize(("answer", "status", "code"), [("no-bucket", 404, "NoSuchBucket"), ("refuse", 403, "AccessDenied")])
+def test_sto4_only_nosuchkey_is_success_a_missing_buckets_404_nosuchbucket_and_any_other_error_still_raise(
+    env, answer: str, status: int, code: str
+) -> None:
+    delete_missing["as"] = answer
+    with pytest.raises(ClientError) as raised:
+        storage.delete("k1/scan.pdf")
+    assert raised.value.response["ResponseMetadata"]["HTTPStatusCode"] == status
+    assert raised.value.response["Error"]["Code"] == code
 
 
 def test_sto1_without_storage_the_helper_says_what_to_declare(env, monkeypatch: pytest.MonkeyPatch) -> None:
