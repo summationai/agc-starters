@@ -262,6 +262,8 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('`unguarded-schedule`') || !text.includes('`AGC_RUN`')) return fail('AGENTS.md doesn\u2019t say a lake app\u2019s scheduled jobs skip rehearsals by `AGC_RUN` (DOC-15, `unguarded-schedule`)');
     // DOC-17: agent-cloud's server-errors root fix: bad input answers 4xx, naming the rule and its title.
     if (!text.includes('`server-errors`, "Requests fail with server errors, most on <METHOD> <path>"')) return fail('AGENTS.md doesn\u2019t say bad input answers 4xx, naming the review\u2019s `server-errors` and its title, "Requests fail with server errors, most on <METHOD> <path>" (DOC-17)');
+    // DOC-18: agent-cloud's silent-errors root fix: each server error is logged at error level, naming the rule and its title.
+    if (!text.includes('`silent-errors`, "Server errors happen, but nothing is logged"')) return fail('AGENTS.md doesn\u2019t say to log each server error at error level, naming the review\u2019s `silent-errors` and its title, "Server errors happen, but nothing is logged" (DOC-18)');
     // DOC-16: act for the person and report in outcomes, as agent.cloud's own AGENTS.md opens (its ORI-4).
     const talking = text.split('\n## Talking to your person\n')[1]?.split('\n## ')[0] ?? '';
     const unsaid = ['never runs agc or a terminal', 'means do it, then report', 'Ask only when agc returns a decision for a person', 'says to get their yes (a brought app\'s port plan)', 'their request leaves a choice open', 'at most three plain lines', '`data.tell_person`, post it word for word'].filter((w) => !talking.includes(w));
