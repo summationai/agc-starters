@@ -235,6 +235,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     if (!text.includes('`unindexed-fk`, "No index on <table>(<columns>)"')) return fail('AGENTS.md\u2019s unindexed-fk line doesn\u2019t name the finding\u2019s title, "No index on <table>(<columns>)" (DOC-5)');
     if (!text.includes('`no-primary-key`')) return fail('AGENTS.md doesn\u2019t say to give every table a primary key, naming the review\u2019s `no-primary-key` (DOC-6)');
     if (!text.includes('`no-primary-key`, "Table <name> has no primary key"')) return fail('AGENTS.md\u2019s no-primary-key line doesn\u2019t name the finding\u2019s title, "Table <name> has no primary key" (DOC-6)');
+    if (!/^- \*\*A primary key on every table:\*\*.*A partitioned table \([^)]+\) needs one that includes the column it's partitioned by, `PRIMARY KEY \(id, created_at\)`/m.test(text)) return fail('AGENTS.md\u2019s primary-key line doesn\u2019t say a partitioned table\u2019s key includes its partition column (DOC-6)');
     // DOC-7: the line, with every path family agent.cloud's review counts as admin-looking (admin-route-answers).
     const admin = text.split('\n').find((l) => l.includes('Admin routes answer only an admin'));
     if (!admin) return fail('AGENTS.md doesn\u2019t say admin routes answer only an admin (DOC-7)');
