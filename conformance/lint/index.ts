@@ -249,6 +249,8 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     // DOC-8: the review files a copy by its last use, and each git branch gets its own copy (agent-cloud's idle-copy cycle 2).
     if (!text.includes('files a copy unused for over a week')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t say the review files a copy unused for over a week (DOC-8)');
     if (!text.includes('names a mirror after the git branch')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t say `agc up` names a mirror after the git branch, so each branch gets its own copy (DOC-8)');
+    // DOC-8: a release going live is often the last thing a builder runs on an app, and agc names its copy then (cycle 4).
+    if (!text.includes('When a release goes live, `agc ship` and `agc wait` end their `next` with `agc down <name> --delete`')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t say agc ship and agc wait name the folder\u2019s copy when a release goes live (DOC-8)');
     if (!text.includes('`no-status-route`')) return fail('AGENTS.md doesn\u2019t tell a lake app to serve /api/status (DOC-9)');
     if (!text.includes('reports that as `restarts`')) return fail('AGENTS.md doesn\u2019t say how to avoid the review\u2019s `restarts` finding (DOC-10)');
     // DOC-11: the rule's name, and each of its three causes: a query per row, a missing index, an outside call in the request.
