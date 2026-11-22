@@ -5,7 +5,8 @@ import { readFileSync } from 'node:fs';
 import { createServer as http } from 'node:http';
 import { createServer as vite } from 'vite';
 import { app } from './app.ts';
-import { required } from './env.ts';
+import { pool } from './db.ts';
+import { onMirror, required } from './env.ts';
 import { log } from './log.ts';
 
 const { PORT } = required('PORT');
@@ -25,6 +26,12 @@ server.on('request', (req, res) => {
   });
 });
 
+if (onMirror) {
+  // DATA-8: hold each checkout until all settle, so the first racing requests reuse distinct connections.
+  // The pool already bounds connection setup to 10 s. A database outage does not stop the dev server from listening.
+  const clients = await Promise.allSettled(Array.from({ length: pool.options.max! }, () => pool.connect()));
+  for (const client of clients) if (client.status === 'fulfilled') client.value.release();
+}
 server.listen(Number(PORT), '0.0.0.0', () => log.info('dev server listening', { port: Number(PORT) }));
 // DEV-2: node --watch sends SIGTERM and starts the new process only once this one has ended, so end at once. Waiting on
 // server.close() waits on any connection a browser holds open (a preconnected socket), and nothing answers for a minute
