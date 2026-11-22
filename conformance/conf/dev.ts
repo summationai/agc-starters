@@ -41,7 +41,9 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
   }
   const user = process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : [];
   const base = ['--network', env.net, '-v', `${src}:/app`, '-w', '/app', ...user, '-e', 'HOME=/tmp/home', '-v', `${env.certs}:/certs:ro`];
-  const mirrorEnv = env.appEnv({ AGENTCLOUD_MIRROR: 'conformance', DATABASE_URL: `${env.databaseUrl}&application_name=mirror-conformance` });
+  const database = new URL(env.databaseUrl);
+  database.searchParams.set('application_name', 'mirror-conformance');
+  const mirrorEnv = env.appEnv({ AGENTCLOUD_MIRROR: 'conformance', DATABASE_URL: database.href });
   const envArgs = Object.entries(mirrorEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 
   if (d.setup) {
