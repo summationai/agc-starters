@@ -23,7 +23,7 @@ const tag = () => randomBytes(4).toString('hex');
 
 export const CONF_TESTS = [
   'CONF:build', 'CONF:bind', 'CONF:routes', 'CONF:health', 'CONF:sigterm-web', 'CONF:sigterm-worker', 'CONF:memory', 'CONF:readonly',
-  'CONF:missing-env', 'CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
+  'CONF:missing-env', 'CONF:dev-routes', 'CONF:mirror-pool', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:reload-worker', 'CONF:cookies', 'CONF:db-tls',
   'CONF:keys', 'CONF:no-ddl', 'CONF:signin', 'CONF:signin-state', 'CONF:mail', 'CONF:mail-once', 'CONF:jobs-race', 'CONF:jobs-idle', 'CONF:jobs-prompt', 'CONF:jobs-prune', 'CONF:logs-json', 'CONF:error-log',
   'CONF:debug-route-hidden', 'CONF:host-cookies', 'CONF:events', 'CONF:no-pii', 'CONF:smoke', 'CONF:invariants', 'CONF:csrf-json', 'CONF:csrf-origin', 'CONF:body-validation', 'CONF:headers', 'CONF:app', 'CONF:seed',
   'CONF:welcome-copy', 'CONF:welcome', 'CONF:welcome-run', 'CONF:signin-return', 'CONF:storage',
