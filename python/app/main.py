@@ -20,7 +20,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import log, mcp
 from .auth import router as auth_router
 from .auth import signed_in, via_of
-from .db import pool, tx
+from .db import pool, tx, warm_pool
+from .env import ON_MIRROR
 from .jobs import run_now
 from .welcome import welcome as welcome_facts
 
@@ -29,9 +30,13 @@ UI = Path("web/dist")
 
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-    pool.open(wait=False)  # health answers at once; the pool connects in the background
-    yield
-    pool.close()
+    pool.open(wait=False)
+    try:
+        if ON_MIRROR:
+            warm_pool()
+        yield
+    finally:
+        pool.close()
 
 
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)

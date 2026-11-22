@@ -41,7 +41,7 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
   }
   const user = process.getuid ? ['--user', `${process.getuid()}:${process.getgid!()}`] : [];
   const base = ['--network', env.net, '-v', `${src}:/app`, '-w', '/app', ...user, '-e', 'HOME=/tmp/home', '-v', `${env.certs}:/certs:ro`];
-  const mirrorEnv = env.appEnv({ AGENTCLOUD_MIRROR: 'conformance' });
+  const mirrorEnv = env.appEnv({ AGENTCLOUD_MIRROR: 'conformance', DATABASE_URL: `${env.databaseUrl}&application_name=mirror-conformance` });
   const envArgs = Object.entries(mirrorEnv).flatMap(([k, v]) => ['-e', `${k}=${v}`]);
 
   if (d.setup) {
@@ -68,6 +68,10 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
     const last = (await env.logs(web)).slice(-8).join('\n');
     for (const t of ['CONF:dev-routes', 'CONF:reload-api', 'CONF:reload-ui', 'CONF:cookies']) out.set(t, fail(`dev never answered GET /api/health:\n${last}`));
   } else {
+    // DATA-8: health doesn't use the database. Before the first sign-in or app request, all ten
+    // connections should already be there. After API reload, count only the new web process's sessions.
+    const sessions = () => env.sql<{ pid: number }>("SELECT pid FROM pg_stat_activity WHERE application_name = 'mirror-conformance' AND state = 'idle'");
+    const initial = new Set((await sessions()).map(({ pid }) => pid));
     // DEV-1, DEV-5
     const jar: Jar = new Map();
     const root = await req(env, web, jar, 'GET', '/');
@@ -93,6 +97,8 @@ export async function dev(env: Env, log: (m: string) => void): Promise<Map<strin
     // DEV-3, then DEV-2: a server save may restart the whole dev process, so the UI's turn comes first.
     out.set('CONF:reload-ui', await reloadHttp(env, web, d.reload.ui));
     out.set('CONF:reload-api', await reloadHttp(env, web, d.reload.api));
+    const restarted = (await sessions()).filter(({ pid }) => !initial.has(pid)).length;
+    out.set('CONF:mirror-pool', (initial.size === 10 && restarted === 10 ? pass : fail)(`idle web connections before use: ${initial.size} at first readiness, ${restarted} new after API reload (expected 10 each)`));
   }
 
   // DEV-4: the worker restarts on save.
