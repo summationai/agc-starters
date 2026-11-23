@@ -33,6 +33,16 @@ test('the fixture passes every lint rule', async () => {
   }
 });
 
+test('RFR-10: both starter guides name no-checks and how to avoid it after a migration failure or before a re-release', () => {
+  for (const stack of ['typescript', 'python']) {
+    const guide = readFileSync(join(import.meta.dirname, '../..', stack, 'AGENTS.md'), 'utf8');
+    const line = guide.split('\n').find((l) => l.includes('`no-checks`, "Releases go live with nothing checked"'));
+    assert.ok(line, stack);
+    assert.ok(line.includes('fix it, add any missing checks, and rerun `agc check` before shipping'), stack);
+    assert.ok(line.includes("ship a build with checks first, so the re-release doesn't reuse an unchecked build"), stack);
+  }
+});
+
 test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:seed', await broken((d) => rmSync(join(d, 'seed.sql')))), 'fail', 'seed declared but missing');
   assert.equal(outcome('LINT:seed', await broken((d) => writeFileSync(join(d, 'seed.sql'), readFileSync(join(GOOD, 'seed.sql'), 'utf8').replace(/ON CONFLICT DO NOTHING;\s*$/, ';')))), 'fail', 'an insert without ON CONFLICT');
