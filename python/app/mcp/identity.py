@@ -45,17 +45,22 @@ def own_issuer() -> str:
     return os.environ.get("AGC_IDENTITY_ISSUER") or f"https://auth.{urlsplit(os.environ['AGC_AUTH_URL']).netloc}"
 
 
-_keys: dict[str, tuple[float, list[dict[str, Any]]]] = {}  # issuer -> its published keys, for at most a minute
+_keys: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}  # (issuer, target) -> its keys, for at most a minute
 
 
 def _keys_of(iss: str) -> list[dict[str, Any]]:
-    hit = _keys.get(iss)
+    target = os.environ.get("AGC_IDENTITY_TARGET", "")
+    hit = _keys.get((iss, target))
     if hit and time.monotonic() - hit[0] < 60:
         return hit[1]
-    r = httpx.get(f"{iss}/.well-known/jwks.json", timeout=3, follow_redirects=False)
-    j = r.json() if r.is_success else None
+    r = httpx.get(f"{iss}/.well-known/jwks.json", params={"target": target} if target else None, timeout=3, follow_redirects=False)
+    scope = r.headers.get("x-agc-key-target")
+    scoped = scope == (target or "platform") or (not target and scope is None)
+    if not r.is_success or not scoped:
+        return []
+    j = r.json()
     found = [k for k in j.get("keys", []) if isinstance(k, dict)] if isinstance(j, dict) and isinstance(j.get("keys"), list) else []
-    _keys[iss] = (time.monotonic(), found)
+    _keys[(iss, target)] = (time.monotonic(), found)
     return found
 
 

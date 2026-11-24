@@ -419,13 +419,18 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     """A fake agent.cloud: the gate's public key, and the answer to each recheck."""
 
     jwks: dict[str, Any] = {}
+    mismatch_scope = "tgt_c1"
     users = (200, {"user": {"role": "member"}})
     people = 200
     asked: list[str] = []
 
     def do_GET(self) -> None:  # noqa: N802 - the standard library's name
+        scope = None
         if self.path == "/.well-known/jwks.json":
             status, body = 200, self.jwks
+        elif self.path in ("/.well-known/jwks.json?target=tgt_c1", "/.well-known/jwks.json?target=tgt_mismatch"):
+            scope = self.mismatch_scope if self.path.endswith("tgt_mismatch") else "tgt_c1"
+            status, body = 200, {"keys": [_jwk(OTHER_KEY, "k2")]}
         elif self.path.startswith("/people?"):
             self.asked.append(self.path)
             status, body = self.people, {"user": {"role": "member"}}
@@ -437,6 +442,8 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("content-type", "application/json")
         self.send_header("content-length", str(len(raw)))
+        if scope:
+            self.send_header("x-agc-key-target", scope)
         self.end_headers()
         self.wfile.write(raw)
 
@@ -744,25 +751,25 @@ def _b64(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
 
-def _jwk(key: ec.EllipticCurvePrivateKey) -> dict[str, str]:
+def _jwk(key: ec.EllipticCurvePrivateKey, kid: str = "k1") -> dict[str, str]:
     n = key.public_key().public_numbers()
     return {
         "kty": "EC",
         "crv": "P-256",
         "x": _b64(n.x.to_bytes(32, "big")),
         "y": _b64(n.y.to_bytes(32, "big")),
-        "kid": "k1",
+        "kid": kid,
         "use": "sig",
         "alg": "ES256",
     }
 
 
-def assertion(iss: str, email: str, claims: dict[str, object] | None = None, key: ec.EllipticCurvePrivateKey = KEY) -> str:
+def assertion(iss: str, email: str, claims: dict[str, object] | None = None, key: ec.EllipticCurvePrivateKey = KEY, kid: str = "k1") -> str:
     import time
     import uuid
 
     now = int(time.time())
-    head = _b64(json.dumps({"alg": "ES256", "kid": "k1", "typ": "JWT"}).encode())
+    head = _b64(json.dumps({"alg": "ES256", "kid": kid, "typ": "JWT"}).encode())
     body = {
         "iss": iss,
         "sub": email,
@@ -860,6 +867,22 @@ def test_amcp_7_consent_needs_a_verified_assertion_from_agent_clouds_own_issuer_
     assert authorize(forged)[0].status_code == 403
     assert authorize({**gate(edge, "x@edge.test", "p3"), "x-agc-user-email": "y@edge.test"})[0].status_code == 403
     assert authorize(gate(edge, "old@edge.test", "p4", exp=int(time.time()) - 1))[0].status_code == 403
+
+
+@needs_pg
+def test_amcp_7_authorize_uses_only_the_configured_runtime_scope(edge: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGC_IDENTITY_TARGET", raising=False)
+    email = "scope@example.test"
+    builtin = gate(edge, email, "p-scope")
+    scoped = {**builtin, "x-agc-identity": assertion(edge, email, {"provider_id": "p-scope"}, OTHER_KEY, "k2")}
+    assert authorize(builtin)[0].status_code == 302  # warm the built-in key cache
+    monkeypatch.setenv("AGC_IDENTITY_TARGET", "tgt_c1")
+    assert authorize(scoped)[0].status_code == 302
+    assert authorize(builtin)[0].status_code == 403
+    monkeypatch.setenv("AGC_IDENTITY_TARGET", "tgt_mismatch")
+    assert authorize(scoped)[0].status_code == 403  # the response has the right key but the wrong scope
+    monkeypatch.setattr(_Fake, "mismatch_scope", "tgt_mismatch")
+    assert authorize(scoped)[0].status_code == 302  # a scope mismatch does not poison the cache
 
 
 @needs_pg

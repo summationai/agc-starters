@@ -199,6 +199,7 @@ Each rule names the check that proves it, over HTTP against the built app and th
   - **Who a grant is:** a grant names the person by a stable identity.
     - On agent.cloud's sign-in, that's the app user's id.
     - On edge sign-in, it's the `iss` and `provider_id` claims of the gate's signed `x-agc-identity` (agent.cloud's EDGE-15). The JWT's `sub` is the email, so it never names a grant.
+    - When the platform supplies `AGC_IDENTITY_TARGET`, the app fetches `/.well-known/jwks.json?target=<id>` from its configured issuer, requires the matching `X-Agc-Key-Target` response, and never falls back to another scope. The key cache is separate for each issuer and scope. Without the variable the app uses the issuer’s default key set and refuses a response explicitly labeled as another scope.
     - An assertion without `provider_id` can't grant.
   - **Losing access:** every grant is rechecked with agent.cloud at most every 5 minutes. On agent.cloud's sign-in, that's AUTH-8's `GET $AGC_AUTH_URL/users/<id>`; on edge sign-in, it's agent.cloud's AMCP-15.
     - The answer also refreshes the person's role.

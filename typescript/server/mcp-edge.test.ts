@@ -18,11 +18,16 @@ if (pg) for (const file of readdirSync(new URL('../migrations/', import.meta.url
 
 // The fake agent.cloud: the gate's public key, and the answer to each recheck (AMCP-15's GET /people).
 const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
-const other = generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey;
+const { privateKey: other, publicKey: otherPublic } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const asked: string[] = [];
 let people = 200;
+let mismatchScope = 'tgt_c1';
 const fake = createServer((req, res) => {
   if (req.url === '/.well-known/jwks.json') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'ES256' }] }));
+  if (req.url === '/.well-known/jwks.json?target=tgt_c1' || req.url === '/.well-known/jwks.json?target=tgt_mismatch') {
+    const scope = req.url.endsWith('tgt_mismatch') ? mismatchScope : 'tgt_c1';
+    return void res.writeHead(200, { 'content-type': 'application/json', 'x-agc-key-target': scope }).end(JSON.stringify({ keys: [{ ...otherPublic.export({ format: 'jwk' }), kid: 'k2', use: 'sig', alg: 'ES256' }] }));
+  }
   if (req.url?.startsWith('/people?')) { asked.push(req.url); return void res.writeHead(people, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { role: 'member' } })); }
   res.writeHead(500).end();
 });
@@ -40,9 +45,9 @@ after(async () => { await pool.end(); fake.close(); if (pg) spawnSync('dropdb', 
 const skip = !pg && 'no local Postgres (createdb failed)';
 
 const b64 = (v: object) => Buffer.from(JSON.stringify(v)).toString('base64url');
-function assertion(email: string, claims: Record<string, unknown> = {}, key = privateKey) {
+function assertion(email: string, claims: Record<string, unknown> = {}, key = privateKey, kid = 'k1') {
   const now = Math.floor(Date.now() / 1000);
-  const head = b64({ alg: 'ES256', kid: 'k1', typ: 'JWT' });
+  const head = b64({ alg: 'ES256', kid, typ: 'JWT' });
   const body = b64({ iss: ISS, sub: email, name: '', aud: 'starter', presence: 'session', jti: randomUUID(), iat: now, exp: now + 300, ...claims });
   return `${head}.${body}.${sign('sha256', Buffer.from(`${head}.${body}`), { key, dsaEncoding: 'ieee-p1363' }).toString('base64url')}`;
 }
@@ -105,6 +110,21 @@ test('AMCP-7: consent needs a verified assertion from agent.cloud’s own issuer
   assert.equal((await authorize(otherEmail)).res.status, 403);
   const expired = gate('old@example.test', 'p4', 'member', { exp: Math.floor(Date.now() / 1000) - 1 });
   assert.equal((await authorize(expired)).res.status, 403);
+});
+
+test('AMCP-7: OAuth consent trusts only the configured runtime scope, not other keys from the same issuer', { skip }, async t => {
+  t.after(() => { delete process.env.AGC_IDENTITY_TARGET; });
+  const email = 'scope@example.test';
+  const builtin = gate(email, 'p-scope');
+  const scoped = { ...builtin, 'x-agc-identity': assertion(email, { provider_id: 'p-scope' }, other, 'k2') };
+  assert.equal((await authorize(builtin)).res.status, 302, 'warm the built-in key cache');
+  process.env.AGC_IDENTITY_TARGET = 'tgt_c1';
+  assert.equal((await authorize(scoped)).res.status, 302);
+  assert.equal((await authorize(builtin)).res.status, 403);
+  process.env.AGC_IDENTITY_TARGET = 'tgt_mismatch';
+  assert.equal((await authorize(scoped)).res.status, 403, 'the response has the right key but the wrong scope');
+  mismatchScope = 'tgt_mismatch';
+  assert.equal((await authorize(scoped)).res.status, 302, 'a scope mismatch does not poison the cache');
 });
 
 test('AMCP-7: an edge grant is rechecked by its issuer and provider_id, and a refusal ends it', { skip }, async () => {
