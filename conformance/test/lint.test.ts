@@ -33,6 +33,16 @@ test('the fixture passes every lint rule', async () => {
   }
 });
 
+test('RFR-10: both starter guides name no-checks and how to avoid it after a migration failure or before a re-release', () => {
+  for (const stack of ['typescript', 'python']) {
+    const guide = readFileSync(join(import.meta.dirname, '../..', stack, 'AGENTS.md'), 'utf8');
+    const line = guide.split('\n').find((l) => l.includes('`no-checks`, "Releases go live with nothing checked"'));
+    assert.ok(line, `${stack}: missing the no-checks rule and its review title`);
+    assert.match(line, /fix it, add any missing checks, and rerun `agc check` before shipping/, `${stack}: missing the advice for failed migrations`);
+    assert.match(line, /ship a build with checks first, so the re-release doesn't reuse an unchecked build/, `${stack}: missing the advice for re-releases`);
+  }
+});
+
 test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:seed', await broken((d) => rmSync(join(d, 'seed.sql')))), 'fail', 'seed declared but missing');
   assert.equal(outcome('LINT:seed', await broken((d) => writeFileSync(join(d, 'seed.sql'), readFileSync(join(GOOD, 'seed.sql'), 'utf8').replace(/ON CONFLICT DO NOTHING;\s*$/, ';')))), 'fail', 'an insert without ON CONFLICT');
@@ -89,8 +99,12 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*A table that only grows:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-12: no word on tables that only grow');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(', "Table <name> grows and nothing deletes from it"', '')))), 'fail', 'DOC-12: the finding\u2019s title left out');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/A foreign key's `ON DELETE CASCADE` doesn't count[^.]*\./, '')))), 'fail', 'DOC-12: no word on cascades');
+  for (const phrase of ['including its schema outside `public`', "Cleanup only in tests, fixtures or seeds doesn't count"]) {
+    assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').split(phrase).join('')))), 'fail', `DOC-12: missing ${phrase}`);
+  }
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*A lake query:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-13: no line for lake-unbounded-query');
-  assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(', "Lake queries read more than they need"', '')))), 'fail', 'DOC-13: the lake line without its title');
+  assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(' ("Lake queries read more than they need")', '')))), 'fail', 'DOC-13: the lake line without its title');
+  assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace('bound the same date partition column on both sides in every `OR` branch', 'mention a date column')))), 'fail', 'DOC-13: a date mention is not a bound');
   assert.equal(outcome('LINT:descriptor', await broken((d) => writeFileSync(join(d, 'server', 'health.ts'), "export const a = { status: 'ok' }; export const b = { status: 'ok' };\n"))), 'fail', 'find occurs twice');
   assert.equal(outcome('LINT:fixed-values', await broken((d) => writeFileSync(join(d, 'migrations', '0002_status.sql'), 'CREATE TABLE tasks (id uuid PRIMARY KEY, status text NOT NULL);\n'))), 'fail');
   assert.equal(outcome('LINT:api', await broken((d) => writeFileSync(join(d, 'web', 'src', 'Notes.tsx'), "export const save = () => fetch('/api/notes', { method: 'POST' });\n"))), 'fail', 'AMCP-9: a fetch outside api.ts');
