@@ -16,14 +16,18 @@ const EDGE = process.env.AGC_AUTH_PROVIDER === 'edge';
 // agent.cloud's own broker issuer, https://auth.<control host> (EDGE-15), or the one agent.cloud names for this app.
 export const ownIssuer = () => process.env.AGC_IDENTITY_ISSUER || `https://auth.${new URL(String(process.env.AGC_AUTH_URL)).host}`;
 
-const keys = new Map<string, { at: number; keys: JsonWebKey[] }>(); // issuer → its published keys, for at most a minute
+const keys = new Map<string, { at: number; keys: JsonWebKey[] }>(); // discovery URL → its keys, for at most a minute
 async function keysOf(iss: string): Promise<JsonWebKey[]> {
-  const hit = keys.get(iss);
+  const target = process.env.AGC_IDENTITY_TARGET;
+  const url = `${iss}/.well-known/jwks.json${target ? `?${new URLSearchParams({ target })}` : ''}`;
+  const hit = keys.get(url);
   if (hit && Date.now() - hit.at < 60_000) return hit.keys;
-  const res = await fetch(`${iss}/.well-known/jwks.json`, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
-  const j = res.ok ? await res.json() as { keys?: unknown } : null;
+  const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
+  const scope = res.headers.get('x-agc-key-target');
+  const scoped = scope === (target || 'platform') || (!target && scope === null);
+  const j = res.ok && scoped ? await res.json() as { keys?: unknown } : null;
   const found = Array.isArray(j?.keys) ? (j!.keys as JsonWebKey[]) : [];
-  keys.set(iss, { at: Date.now(), keys: found });
+  keys.set(url, { at: Date.now(), keys: found });
   return found;
 }
 
