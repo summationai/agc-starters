@@ -21,7 +21,7 @@ uv add <package>           a new dependency (commit uv.lock with it)
 
 While you build an open Work item, people in the app's organization can watch you in the console. At each step, before you start it, run `agc now "<what you're about to do>"`: one line, in the present tense, of up to 120 characters ("Adding the scores table and its migration"). They see it as your words, with the saves that follow under it. It goes through the running mirror (`agc up --detach`).
 
-Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, holding storage, and agent.cloud's review files a copy unused for over a week (`idle-copy`, "Copy <name> has been idle for over a week"). `agc up` names a mirror after the git branch, so each git branch you run it on gets its own copy: delete each once its work has shipped.
+Once a mirror's work has shipped, delete its copy with `agc down <name> --delete`: `agc down` alone keeps it, holding storage, and agent.cloud's review files a copy unused for over a week (`idle-copy`, "Copy <name> has been idle for over a week"). `agc up` names a mirror after the git branch, so each git branch you run it on gets its own copy: delete each once its work has shipped. When a release goes live, `agc ship` and `agc wait` end their `next` with `agc down <name> --delete` for the copy this folder runs: if you're done with the app for now, run it before you leave, since a copy left then is the one filed a week later.
 ## Where things are
 
 ```text
