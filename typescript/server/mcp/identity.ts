@@ -25,7 +25,8 @@ async function keysOf(iss: string): Promise<JsonWebKey[]> {
   const res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(3_000) });
   const scope = res.headers.get('x-agc-key-target');
   const scoped = scope === (target || 'platform') || (!target && scope === null);
-  const j = res.ok && scoped ? await res.json() as { keys?: unknown } : null;
+  if (!res.ok || !scoped) return [];
+  const j = await res.json() as { keys?: unknown };
   const found = Array.isArray(j?.keys) ? (j!.keys as JsonWebKey[]) : [];
   keys.set(url, { at: Date.now(), keys: found });
   return found;

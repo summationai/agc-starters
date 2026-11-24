@@ -56,7 +56,9 @@ def _keys_of(iss: str) -> list[dict[str, Any]]:
     r = httpx.get(f"{iss}/.well-known/jwks.json", params={"target": target} if target else None, timeout=3, follow_redirects=False)
     scope = r.headers.get("x-agc-key-target")
     scoped = scope == (target or "platform") or (not target and scope is None)
-    j = r.json() if r.is_success and scoped else None
+    if not r.is_success or not scoped:
+        return []
+    j = r.json()
     found = [k for k in j.get("keys", []) if isinstance(k, dict)] if isinstance(j, dict) and isinstance(j.get("keys"), list) else []
     _keys[(iss, target)] = (time.monotonic(), found)
     return found

@@ -419,6 +419,7 @@ class _Fake(http.server.BaseHTTPRequestHandler):
     """A fake agent.cloud: the gate's public key, and the answer to each recheck."""
 
     jwks: dict[str, Any] = {}
+    mismatch_scope = "tgt_c1"
     users = (200, {"user": {"role": "member"}})
     people = 200
     asked: list[str] = []
@@ -428,7 +429,7 @@ class _Fake(http.server.BaseHTTPRequestHandler):
         if self.path == "/.well-known/jwks.json":
             status, body = 200, self.jwks
         elif self.path in ("/.well-known/jwks.json?target=tgt_c1", "/.well-known/jwks.json?target=tgt_mismatch"):
-            scope = "tgt_c1"
+            scope = self.mismatch_scope if self.path.endswith("tgt_mismatch") else "tgt_c1"
             status, body = 200, {"keys": [_jwk(OTHER_KEY, "k2")]}
         elif self.path.startswith("/people?"):
             self.asked.append(self.path)
@@ -880,6 +881,8 @@ def test_amcp_7_authorize_uses_only_the_configured_runtime_scope(edge: str, monk
     assert authorize(builtin)[0].status_code == 403
     monkeypatch.setenv("AGC_IDENTITY_TARGET", "tgt_mismatch")
     assert authorize(scoped)[0].status_code == 403  # the response has the right key but the wrong scope
+    monkeypatch.setattr(_Fake, "mismatch_scope", "tgt_mismatch")
+    assert authorize(scoped)[0].status_code == 302  # a scope mismatch does not poison the cache
 
 
 @needs_pg

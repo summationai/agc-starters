@@ -21,10 +21,12 @@ const { privateKey, publicKey } = generateKeyPairSync('ec', { namedCurve: 'P-256
 const { privateKey: other, publicKey: otherPublic } = generateKeyPairSync('ec', { namedCurve: 'P-256' });
 const asked: string[] = [];
 let people = 200;
+let mismatchScope = 'tgt_c1';
 const fake = createServer((req, res) => {
   if (req.url === '/.well-known/jwks.json') return void res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ keys: [{ ...publicKey.export({ format: 'jwk' }), kid: 'k1', use: 'sig', alg: 'ES256' }] }));
   if (req.url === '/.well-known/jwks.json?target=tgt_c1' || req.url === '/.well-known/jwks.json?target=tgt_mismatch') {
-    return void res.writeHead(200, { 'content-type': 'application/json', 'x-agc-key-target': 'tgt_c1' }).end(JSON.stringify({ keys: [{ ...otherPublic.export({ format: 'jwk' }), kid: 'k2', use: 'sig', alg: 'ES256' }] }));
+    const scope = req.url.endsWith('tgt_mismatch') ? mismatchScope : 'tgt_c1';
+    return void res.writeHead(200, { 'content-type': 'application/json', 'x-agc-key-target': scope }).end(JSON.stringify({ keys: [{ ...otherPublic.export({ format: 'jwk' }), kid: 'k2', use: 'sig', alg: 'ES256' }] }));
   }
   if (req.url?.startsWith('/people?')) { asked.push(req.url); return void res.writeHead(people, { 'content-type': 'application/json' }).end(JSON.stringify({ user: { role: 'member' } })); }
   res.writeHead(500).end();
@@ -121,6 +123,8 @@ test('AMCP-7: OAuth consent trusts only the configured runtime scope, not other 
   assert.equal((await authorize(builtin)).res.status, 403);
   process.env.AGC_IDENTITY_TARGET = 'tgt_mismatch';
   assert.equal((await authorize(scoped)).res.status, 403, 'the response has the right key but the wrong scope');
+  mismatchScope = 'tgt_mismatch';
+  assert.equal((await authorize(scoped)).res.status, 302, 'a scope mismatch does not poison the cache');
 });
 
 test('AMCP-7: an edge grant is rechecked by its issuer and provider_id, and a refusal ends it', { skip }, async () => {
