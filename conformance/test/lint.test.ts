@@ -98,6 +98,7 @@ test('each broken copy fails the rule it breaks', async () => {
   for (const [cut, what] of [[/ rather than one per row/, 'a query per row'], [/, index what it filters and joins by/, 'an index'], [/, and put an outside call in a job rather than make the person wait on it/, 'outside calls']] as const) {
     assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(cut, '')))), 'fail', `DOC-11: no word on ${what}`);
   }
+  assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace('a serial smoke step with realistic data', 'another check')))), 'fail', 'DOC-11: no realistic serial smoke baseline');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*A table that only grows:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-12: no word on tables that only grow');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(', "Table <name> grows and nothing deletes from it"', '')))), 'fail', 'DOC-12: the finding\u2019s title left out');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/A foreign key's `ON DELETE CASCADE` doesn't count[^.]*\./, '')))), 'fail', 'DOC-12: no word on cascades');
