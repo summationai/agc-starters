@@ -99,7 +99,7 @@ test('each broken copy fails the rule it breaks', async () => {
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*A table that only grows:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-12: no word on tables that only grow');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(', "Table <name> grows and nothing deletes from it"', '')))), 'fail', 'DOC-12: the finding\u2019s title left out');
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/A foreign key's `ON DELETE CASCADE` doesn't count[^.]*\./, '')))), 'fail', 'DOC-12: no word on cascades');
-  for (const phrase of ['including its schema outside `public`', "Cleanup only in tests, fixtures or seeds doesn't count"]) {
+  for (const phrase of ['including its schema outside `public`', "Cleanup only in tests, fixtures or seeds doesn't count", 'A one-off `DELETE` or `TRUNCATE` in a migration does not replace recurring cleanup.']) {
     assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').split(phrase).join('')))), 'fail', `DOC-12: missing ${phrase}`);
   }
   assert.equal(outcome('LINT:agents-md', await broken((d) => writeFileSync(join(d, 'AGENTS.md'), readFileSync(join(GOOD, 'AGENTS.md'), 'utf8').replace(/- \*\*A lake query:\*\*[^\n]*\n/, '')))), 'fail', 'DOC-13: no line for lake-unbounded-query');
