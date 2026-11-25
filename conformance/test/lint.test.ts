@@ -38,6 +38,8 @@ test('RFR-10: both starter guides name no-checks and how to avoid it after a mig
     const guide = readFileSync(join(import.meta.dirname, '../..', stack, 'AGENTS.md'), 'utf8');
     const line = guide.split('\n').find((l) => l.includes('`no-checks`, "Releases go live with nothing checked"'));
     assert.ok(line, `${stack}: missing the no-checks rule and its review title`);
+    assert.match(line, /A green test suite, `\[\[verify\]\]`, and a health check don't count as release checks\./);
+    assert.match(line, /add them before starting `agc ship`, even if `agc check` exits 0/);
     assert.match(line, /fix it, add any missing checks, and rerun `agc check` before shipping/, `${stack}: missing the advice for failed migrations`);
     assert.match(line, /ship a build with checks first, so the re-release doesn't reuse an unchecked build/, `${stack}: missing the advice for re-releases`);
   }
