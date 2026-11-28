@@ -242,7 +242,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const unnamed = ['/admin', '/internal', '/debug', '/_debug', '/manage', '/dashboard', '/api/', 'SIGN IN', '401|403'].filter((w) => !admin.includes(`\`${w}\``));
     if (unnamed.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t name ${unnamed.join(', ')} (DOC-7)`);
     // DOC-7: what the review counts and what proof closes it (agent-cloud's admin-route-answers cycle 2).
-    const proof = ['an admin\'s own', 'The UI\'s page counts too', 'answer 404', 'a flow of its own', 'first step', 'no `headers`', 'only `401|403`'].filter((w) => !admin.includes(w));
+    const proof = ['an admin\'s own', 'The UI\'s page counts too', 'answer 404', 'a flow of its own', 'first step', 'no `headers`', 'only `401|403`', '`HEAD` and `OPTIONS` their own proofs', 'a whole segment of digits', '`/admin/v1` doesn\'t cover `/admin/v2`'].filter((w) => !admin.includes(w));
     if (proof.length) return fail(`AGENTS.md\u2019s admin-route line doesn\u2019t say ${proof.map((w) => `"${w}"`).join(', ')} (DOC-7)`);
     if (!text.includes('`agc down <name> --delete`') || !text.includes('`idle-copy`')) return fail('AGENTS.md doesn\u2019t say to delete a shipped mirror\u2019s copy with agc down <name> --delete (DOC-8, idle-copy)');
     if (!text.includes('"Copy <name> has been idle for over a week"')) return fail('AGENTS.md\u2019s idle-copy line doesn\u2019t name the finding\u2019s title, "Copy <name> has been idle for over a week" (DOC-8)');
