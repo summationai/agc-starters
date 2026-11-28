@@ -258,6 +258,7 @@ export const lint: Record<string, (s: Stack) => TestResult> = {
     const missing = [['one per row', /one per row/], ['an index', /\bindex\b/], ['a job for outside calls', /outside call[^.]*\bjob\b/]].filter(([, re]) => !(re as RegExp).test(slow)).map(([what]) => what);
     if (!slow || missing.length) return fail(`AGENTS.md doesn\u2019t say how to keep a route under a second${slow ? ` (it names no ${missing.join(', ')})` : ', naming the review\u2019s `slow-route` and its title, "<METHOD> <path> is slow"'} (DOC-11)`);
     if (!slow.includes('Give routes tested only in parallel a serial smoke step with realistic data')) return fail('AGENTS.md must give routes tested only in parallel a realistic serial smoke baseline (DOC-11)');
+    if (!slow.includes('measure time spent waiting for database connections or locks, and shorten transactions that hold locks')) return fail('AGENTS.md must say how to diagnose contention when the serial step is fast (DOC-11)');
     if (!text.includes('decide how long its rows are needed') || !text.includes('`unbounded-table`')) return fail('AGENTS.md doesn\u2019t say to decide how long a table\u2019s rows are needed and delete older ones (DOC-12)');
     const growing = text.split('\n').find((line) => line.includes('`unbounded-table`, "Table <name> grows and nothing deletes from it"'));
     if (!growing) return fail('AGENTS.md\u2019s unbounded-table line doesn\u2019t name the finding\u2019s title, "Table <name> grows and nothing deletes from it" (DOC-12)');
